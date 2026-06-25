@@ -45,18 +45,19 @@ scripts/
 
 ## Prerequisites on the workbench app
 
-- `bcftools`, `tabix`, `bgzip`, `gsutil`, `java`, `python3`, `wb` CLI, `rustc` (for the pop binary).
+- `bcftools`, `tabix`, `bgzip`, `gsutil`, `gcloud`, `plink2`, `java`, `python3`, `wb` CLI, `rustc` (for the pop binary).
 - The clone workspace bucket resolves via `wb resource resolve --name rw-migration-aou-rw-f178dfde`.
 
 ## Data NOT in this repo (controlled access — supply on the VM)
 
 - `truth.aou.chr1.bcf` (+ `.csi`): the 198's full-panel genotypes (your `check_holdout_panel.sh` Step A).
   Used to derive the 198 id list and as the eval truth. Defaults to `gs://cloned-rw-migration-aou-rw-f178dfde-wb-sharp-papaya-7463/vcf/truth.aou.chr1.bcf`; override with `TRUTH_AOU=`.
-- ACAF shards. By default (`TARGET_PULL_MODE=copy`) they are `gsutil cp`'d straight from
-  `gs://vwb-aou-datasets-controlled/.../acaf_threshold/vcf` (override `AOU_VCF_GS`) to local
-  SSD — no gcsfuse mount needed, and faster than reading in place. Set `TARGET_PULL_MODE=mount`
-  to instead read the gcsfuse mount at `AOU_VCF_MOUNT` (default
-  `~/workspace/vwb-aou-datasets-controlled/v8/wgs/short_read/snpindel/acaf_threshold/vcf`).
+- ACAF genotypes. Pulled from the **chromosome-sharded ACAF PGEN** with `plink2` (`--keep` the
+  198 → export VCF), from `gs://vwb-aou-datasets-controlled/.../acaf_threshold/pgen` (override
+  `AOU_PGEN_GS`); expects `<contig>.pgen` + `.pvar[.zst]` + `.psam`. plink2 subsets the 198 from
+  the packed binary genotypes (no 245k-column text parse) and PGEN preserves REF/ALT/indels for
+  the min-rep projection. One `<=~100GB` file per chromosome is downloaded to local SSD, used,
+  then removed (so a single chromosome fits in ~500GB local disk).
 - Leaveout / sites-only / id-split panels are pulled from `gs://rw-long-reads-transfer-2026-06-17/…` automatically.
 
 `.gitignore` blocks all VCF/BCF/BED/binary artifacts so controlled data is never committed.
@@ -106,23 +107,22 @@ pre-build (e.g. to build once before launching); the prep does the same automati
 | `POP_BUILD_DIR` | `~/pop-build` | where the pop binary is built/cached (idempotent reuse) |
 | `TRUTH_AOU` | `gs://cloned-rw-migration-aou-rw-f178dfde-wb-sharp-papaya-7463/vcf/truth.aou.chr1.bcf` | 198 full-panel genotypes (id source + eval truth) |
 | `AOU_SAMPLES` | (derive from TRUTH_AOU) | explicit 198 id list (local/gs) |
-| `TARGET_PULL_MODE` | `copy` | `copy` = a prefetch buffer downloads each bracketed ACAF shard **a little ahead of the reader** with `gcloud storage cp` (plus the bucket `.tbi`/`.csi` index, used for the `-r` region query) into local SSD, then runs bcftools locally and frees each shard right after — so bcftools never waits on the network. Needs only `AOU_VCF_GS` (no mount). `mount` = read in place over the gcsfuse `AOU_VCF_MOUNT`. |
-| `DL_PARALLEL` | `=PARALLEL` | copy mode: concurrent shard downloads |
-| `PREFETCH` | `PARALLEL+2` | copy mode: max shards downloaded-but-unread held ahead of the reader. Peak local disk ≈ `(PREFETCH + DL_PARALLEL)` × shard; lower these (or `PARALLEL`) if disk is tight |
-| `AOU_VCF_GS` | acaf_threshold `vcf/` gs:// dir | ACAF shard source for `copy` mode (lists `*.vcf.bgz`) |
-| `AOU_VCF_MOUNT` | acaf_threshold `vcf/` | gcsfuse mount of ACAF shards (only used when `TARGET_PULL_MODE=mount`) |
+| `AOU_PGEN_GS` | acaf_threshold `pgen/` gs:// dir | ACAF PGEN source dir; expects `<contig>.pgen` + `.pvar[.zst]` + `.psam` |
+| `TARGET_FILTER` | `PASS,.` | site FILTER kept (bcftools `-f`) on the plink2 export; `PASS,.` keeps PASS + unfiltered (`.`), drops LowQual/ExcessHet/… Set `PASS` for strict, empty to disable |
+| `THREADS` | `nproc` | plink2 export + bcftools norm threads |
 | `PROJECT_LOCAL` | (auto-detect) | path to project_to_panel_rep.py |
 | `CONTIGS` | `chr1` | contig(s) |
 | `ENABLE_POP` | `true` | emit popped output |
-| `TARGET_CONCURRENT` | `true` | overlap the ACAF shard pulls with the panel prep + bref3 build |
+| `TARGET_CONCURRENT` | `true` | overlap the ACAF PGEN pull+export with the panel prep + bref3 build |
 
 ## Notes
 
-- Multiallelic ACAF sites are split (`bcftools norm -m -any`, and the projection splits
-  internally too) with GT recoding; only SNV-equivalent alleles (true + padded) are scaffolded —
-  indels/MNVs are imputed, not scaffolded.
-- ACAF shard pulls run concurrently with the panel prep + bref3 build by default (`TARGET_CONCURRENT=true`);
-  the slow java bref3 build no longer blocks the shard copies. Set `TARGET_CONCURRENT=false` for the old serial order.
+- The ACAF target comes from the chromosome-sharded ACAF **PGEN** via `plink2 --keep <198> --export vcf`
+  (hard-call GTs only — ACAF carries no PL, so this is a GT scaffold, not PL-based). Multiallelic sites
+  are split (`bcftools norm -m -any`, and the projection splits internally too) with GT recoding; only
+  SNV-equivalent alleles (true + padded) are scaffolded — indels/MNVs are imputed, not scaffolded.
+- The ACAF PGEN pull+export runs concurrently with the panel prep + bref3 build by default
+  (`TARGET_CONCURRENT=true`). Set `TARGET_CONCURRENT=false` for the old serial order.
 - The eval WDLs fetch tools at runtime (concordance binary via wget, cyvcf2 via conda); if the
   VPC-SC perimeter blocks that, switch them to a prebuilt/offline approach.
 - Sample-id namespace must match between panel/truth and ACAF; the prep errors if 0 of the 198 are

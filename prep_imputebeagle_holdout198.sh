@@ -60,17 +60,19 @@ PANEL_SRC_TMPL="${PANEL_SRC_TMPL-}"
 # Used ONLY to build the sparse target. local path or gs://. Index (.csi/.tbi) expected alongside.
 TRUTH_AOU="${TRUTH_AOU:-gs://cloned-rw-migration-aou-rw-f178dfde-wb-sharp-papaya-7463/vcf/truth.aou.chr1.bcf}"
 
-# ---- ACAF (short-read) target source ----------------------------------------
-# The 198 target is built from the SAME 198 held-out AoU samples' REAL short-read
-# (ACAF) calls, then PROJECTED onto the leaveout panel's bubble-allele
-# representation (minimal-rep matching, the GT analog of extract-bubble-PLs).
-# Reference = leaveout panel (bref3); truth (eval) = full panel. This measures
-# empirical ACAF->panel imputation, not the optimistic panel-derived target.
-AOU_VCF_MOUNT="${AOU_VCF_MOUNT:-${HOME}/workspace/vwb-aou-datasets-controlled/v8/wgs/short_read/snpindel/acaf_threshold/vcf}"
-AOU_VCF_GS="${AOU_VCF_GS:-gs://vwb-aou-datasets-controlled/v8/wgs/short_read/snpindel/acaf_threshold/vcf}"   # for the mount-missing hint only
+# ---- ACAF (short-read) target source: per-chromosome PGEN (plink2) ----------
+# The 198 target is built from the SAME 198 held-out AoU samples' REAL short-read (ACAF)
+# hard-call GTs, pulled from the chromosome-sharded ACAF PGEN with plink2 (--keep the 198 ->
+# export VCF), then PROJECTED onto the leaveout panel's bubble-allele representation (minimal-rep
+# matching, the GT analog of extract-bubble-PLs). Reference = leaveout panel (bref3); truth (eval)
+# = full panel. PGEN preserves REF/ALT/indels/multiallelics (faithful for min-rep matching) and
+# lets plink2 subset the 198 from the packed genotypes without the 245k-column text parse the
+# scattered VCF shards required. Per the AoU layout the files are
+# <AOU_PGEN_GS>/<contig>.pgen + .pvar[.zst] + .psam (one <=~100GB file per chromosome).
+AOU_PGEN_GS="${AOU_PGEN_GS:-gs://vwb-aou-datasets-controlled/v8/wgs/short_read/snpindel/acaf_threshold/pgen}"
 # 198 held-out AoU ids: local/gs file (one id per line). If unset, derived from TRUTH_AOU's sample list.
 AOU_SAMPLES="${AOU_SAMPLES:-}"
-# representation projection script (runs locally over the mount); auto-detected at ~ or ./ if unset.
+# representation projection script (runs locally); auto-detected at ~ or ./ if unset.
 PROJECT_LOCAL="${PROJECT_LOCAL:-}"
 
 REF_PREFIX="${WORK}/ref/aou_lr_phase2_v1_leaveout"   # bref3 = <prefix>.<contig>.bref3 (+ .unique_variants)
@@ -129,35 +131,17 @@ WDL_REL="wdl/imputebeagle_withpop"
 WDL_GCS="${BUCKET}/${WDL_REL}/"
 
 PANEL_THREADS="${PANEL_THREADS:-8}"
-THREADS="${THREADS:-$(nproc 2>/dev/null || echo 8)}"
-# target build runs LOCALLY: PARALLEL shards x SHARD_THREADS each (~THREADS). With
-# TARGET_PULL_MODE=copy each bracketed shard is gsutil-cp'd to local SSD first (sliced
-# parallel download, no FUSE), so peak local disk ~= PARALLEL * shard_size (each shard is
-# removed right after its part is written). Lower PARALLEL if local disk is tight.
-SHARD_THREADS="${SHARD_THREADS:-1}"   # threads per shard; PARALLEL=THREADS/SHARD_THREADS shards at once -> one shard per thread
-PARALLEL="${PARALLEL:-$(( THREADS/SHARD_THREADS > 0 ? THREADS/SHARD_THREADS : 1 ))}"
-MERGE_THREADS="${MERGE_THREADS:-${THREADS}}"
-TARGET_CONCURRENT="${TARGET_CONCURRENT:-true}"   # overlap ACAF shard pulls with panel prep + bref3 build
-# Shard pull transport (the slow part): 'copy' = cp each bracketed shard to local SSD then
-# bcftools locally (fast; needs only AOU_VCF_GS + local disk, NOT the mount); 'mount' = read
-# in place over the gcsfuse mount (AOU_VCF_MOUNT). Sample-subsetting reads the whole region
-# regardless, and the bracketed shards are ~whole-file for the contig, so copy (parallel
-# object download) beats gcsfuse streaming + .tbi random reads.
-TARGET_PULL_MODE="${TARGET_PULL_MODE:-copy}"
-# copy-mode prefetch buffer: a downloader pulls shards a little ahead of the reader so bcftools
-# never waits on the network. DL_PARALLEL concurrent downloads; at most PREFETCH shards held
-# downloaded-but-unread -> peak local disk ~= (PREFETCH + DL_PARALLEL) * shard_size.
-DL_PARALLEL="${DL_PARALLEL:-${PARALLEL}}"
-PREFETCH="${PREFETCH:-$(( PARALLEL + 2 ))}"
-# keep only ACAF sites whose FILTER passes this list (bcftools -f). Default "PASS,." keeps
-# PASS plus unfiltered (FILTER=".") sites (here "." implies PASS); other filters (LowQual,
-# ExcessHet, ...) are dropped. Set TARGET_FILTER="PASS" to require an explicit PASS, or
+THREADS="${THREADS:-$(nproc 2>/dev/null || echo 8)}"   # plink2 export + bcftools norm threads for the target build
+TARGET_CONCURRENT="${TARGET_CONCURRENT:-true}"   # overlap the ACAF PGEN pull+export with panel prep + bref3 build
+# keep only ACAF sites whose FILTER passes this list (bcftools -f, applied to the plink2 export).
+# Default "PASS,." keeps PASS plus unfiltered (FILTER=".") sites ("." implies PASS); other filters
+# (LowQual, ExcessHet, ...) are dropped. Set TARGET_FILTER="PASS" to require an explicit PASS, or
 # TARGET_FILTER= (empty) to disable site filtering.
 TARGET_FILTER="${TARGET_FILTER-PASS,.}"
 IDEMPOTENT="${IDEMPOTENT:-true}"
 
 # ============================ preflight ======================================
-for t in gsutil gcloud curl unzip awk wb python3 bcftools tabix bgzip java; do
+for t in gsutil gcloud curl unzip awk wb python3 bcftools tabix bgzip java plink2; do
   command -v "$t" >/dev/null 2>&1 || { echo "MISSING TOOL: $t"; exit 1; }
 done
 [ -n "${PROJECT}" ] || { echo "PROJECT empty (set GOOGLE_CLOUD_PROJECT)"; exit 1; }
@@ -174,10 +158,13 @@ retry() {
   done
 }
 
-# --- ACAF (requester-pays) transport helpers: copy-to-local instead of the gcsfuse mount ---
-acaf_cp()  { retry gcloud storage cp --billing-project="${AOU_USER_PROJECT}" "$1" "$2"; }  # gs:// -> local (parallel striped dl)
-acaf_cat() { gsutil -u "${AOU_USER_PROJECT}" cat "$1"; }            # gs:// -> stdout (streamed; caller may early-close)
-acaf_ls()  { gsutil -u "${AOU_USER_PROJECT}" ls "$1"; }            # list a gs:// prefix (full gs:// urls)
+# --- ACAF (requester-pays) transport helpers ---
+acaf_cp()  { retry gcloud storage cp --billing-project="${AOU_USER_PROJECT}" "$1" "$2"; }   # gs:// -> local (parallel striped dl)
+acaf_obj_exists() { gcloud storage ls --billing-project="${AOU_USER_PROJECT}" "$1" >/dev/null 2>&1; }
+dl_to() {                                  # $1=gs-url $2=local-dest -> atomic download, skip if already present
+  [ -s "$2" ] && { echo ">> have $(basename "$2") (cached)"; return 0; }
+  acaf_cp "$1" "$2.part" && mv "$2.part" "$2"
+}
 
 PANEL_CANON=""; PANEL_LOCAL=""
 ensure_panel_local() {                                 # download leaveout PANEL_CANON -> PANEL_LOCAL once
@@ -257,39 +244,6 @@ stage_map() {                              # $1=contig
   gsutil cp "${LOCAL}/${c}.withchr.map" "$GMAP"
 }
 
-# ---- ACAF shard ordering (first-contig order via tabix -l) for binary search ----
-corder() {                                 # chr name -> numeric order key
-  local x="${1#chr}"
-  case "$x" in
-    X) echo 23;; Y) echo 24;; M|MT) echo 25;;
-    ''|*[!0-9]*) echo 99;;
-    *) echo "$x";;
-  esac
-}
-# first contig of a shard. mount: from the .tbi (tabix -l). copy: stream just the first data
-# record's CHROM over the network (no index / full-file read needed). memoized per ref.
-declare -A _FC_CACHE
-shard_first_contig() {                     # $1 = shard ref (mount path or gs:// url)
-  local s="$1"
-  if [ -n "${_FC_CACHE[$s]+x}" ]; then printf '%s' "${_FC_CACHE[$s]}"; return; fi
-  local fc
-  if [ "${TARGET_PULL_MODE}" = "copy" ]; then
-    fc="$( set +o pipefail; acaf_cat "$s" 2>/dev/null | bcftools view -H 2>/dev/null | head -1 | cut -f1 )"
-  else
-    fc="$( tabix -l "$s" 2>/dev/null | head -1 )"
-  fi
-  _FC_CACHE[$s]="$fc"; printf '%s' "$fc"
-}
-_firstord() { corder "$(shard_first_contig "${SHARDS[$1]}")"; }   # uses global SHARDS
-_lb() {                                    # lower_bound: first shard with first-contig order >= $1
-  local tgt="$1" lo=0 hi=${#SHARDS[@]} m fo
-  while [ "$lo" -lt "$hi" ]; do
-    m=$(( (lo + hi) / 2 )); fo="$(_firstord "$m")"
-    if [ "$fo" -lt "$tgt" ]; then lo=$((m + 1)); else hi="$m"; fi
-  done
-  echo "$lo"
-}
-
 resolve_project_script() {                 # -> path to project_to_panel_rep.py (local), or empty
   local d
   for d in "${PROJECT_LOCAL}" "${HOME}/project_to_panel_rep.py" "./project_to_panel_rep.py" "${PWD}/project_to_panel_rep.py"; do
@@ -312,7 +266,7 @@ resolve_198_samples() {                    # $1=truth-local -> ${LOCAL}/holdout1
   echo "$S"
 }
 
-pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic target (NETWORK phase; safe to run in background)
+pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic target via plink2/PGEN (background-safe)
   local c="$1"
   local TGT="${TARGET_DIR}${TARGET_BASE}_${c}.snps.vcf.gz"
   if [ "${IDEMPOTENT}" = "true" ] && gs_exists "${TGT}" && gs_exists "${TGT}.tbi"; then
@@ -320,13 +274,13 @@ pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic tar
   fi
   local ACAF="${LOCAL}/${TARGET_BASE}_${c}.acaf.snps.vcf.gz"
   if [ -s "$ACAF" ] && [ "$(bcftools query -l "$ACAF" 2>/dev/null | wc -l)" -gt 0 ]; then
-    echo ">> [$c] ACAF concat exists, reusing: ${ACAF}"; return
+    echo ">> [$c] ACAF target exists, reusing: ${ACAF}"; return
   fi
-  # The 198 held-out AoU samples' REAL short-read (ACAF) biallelic calls are extracted from the
-  # ACAF shards (multiallelics split, GTs recoded). This phase depends only on TRUTH_AOU (for the id
-  # list) and the ACAF shards (copied from gs:// by default) -- NOT on the panel prep / bref3
-  # build -- so it runs concurrently
-  # with them. The projection onto panel representation happens later in project_target.
+  # The 198 held-out AoU samples' REAL short-read (ACAF) hard-call GTs are pulled from the
+  # chromosome-sharded ACAF PGEN with plink2 (--keep the 198 -> export VCF), multiallelics split
+  # and GTs recoded with bcftools norm. Depends only on TRUTH_AOU (for the id list) and the ACAF
+  # PGEN -- NOT the panel prep / bref3 build -- so it runs concurrently. The projection onto panel
+  # representation happens later in project_target.
 
   # --- resolve the 198 ids (default: TRUTH_AOU's sample list == the held-out set) ---
   local TA
@@ -342,131 +296,44 @@ pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic tar
   local SAMP_LOC; SAMP_LOC="$(resolve_198_samples "$TA")"
   echo ">> [$c] target samples: $(wc -l < "$SAMP_LOC") held-out AoU ids"
 
-  # --- discover ACAF shards (copy: list gs://; mount: ls the gcsfuse mount) ---
-  SHARDS=()
-  if [ "${TARGET_PULL_MODE}" = "copy" ]; then
-    mapfile -t SHARDS < <(acaf_ls "${AOU_VCF_GS}/" 2>/dev/null | grep -E '\.vcf\.bgz$' | sort)
-    if [ "${#SHARDS[@]}" -eq 0 ]; then
-      echo "ERROR: no *.vcf.bgz under ${AOU_VCF_GS} (requester-pays; billing project=${AOU_USER_PROJECT}). Check AOU_VCF_GS / AOU_USER_PROJECT, or use TARGET_PULL_MODE=mount."
-      exit 1
-    fi
-    echo ">> [$c] ${#SHARDS[@]} ACAF shards listed at ${AOU_VCF_GS} (pull mode: copy)"
+  # plink2 --keep file: match on IID only (the psam may carry an FID we don't want to match on)
+  local KEEP="${LOCAL}/holdout198.plink_keep.${c}.txt"
+  { printf '#IID\n'; cat "$SAMP_LOC"; } > "$KEEP"
+
+  # --- download the per-chromosome ACAF PGEN triple (pgen + pvar[.zst] + psam) ---
+  local PDIR="${LOCAL}/pgen"; mkdir -p "$PDIR"
+  local PFX="${PDIR}/${c}" VZS=""
+  echo ">> [$c] downloading ACAF PGEN: ${AOU_PGEN_GS}/${c}.{pgen,pvar[.zst],psam}"
+  dl_to "${AOU_PGEN_GS}/${c}.pgen" "${PFX}.pgen"
+  dl_to "${AOU_PGEN_GS}/${c}.psam" "${PFX}.psam"
+  if [ -s "${PFX}.pvar.zst" ] || acaf_obj_exists "${AOU_PGEN_GS}/${c}.pvar.zst"; then
+    dl_to "${AOU_PGEN_GS}/${c}.pvar.zst" "${PFX}.pvar.zst"; VZS="vzs"
   else
-    [ -d "${AOU_VCF_MOUNT}" ] || { echo "ERROR: ACAF mount not found: ${AOU_VCF_MOUNT} (set AOU_VCF_MOUNT to the acaf_threshold vcf/ dir, or use TARGET_PULL_MODE=copy)"; exit 1; }
-    mapfile -t SHARDS < <(ls -U -1 "${AOU_VCF_MOUNT}" 2>/dev/null | grep -E '\.vcf\.bgz$' | sed "s#^#${AOU_VCF_MOUNT}/#" | sort)
-    if [ "${#SHARDS[@]}" -eq 0 ]; then
-      echo "ERROR: no *.vcf.bgz under ${AOU_VCF_MOUNT}"
-      gsutil -u "${AOU_USER_PROJECT}" ls "${AOU_VCF_GS}/" 2>/dev/null | grep -qE '\.vcf\.bgz$' \
-        && echo "  -> shards exist in ${AOU_VCF_GS} (requester-pays); set TARGET_PULL_MODE=copy, or remount with --billing-project + --implicit-dirs and set AOU_VCF_MOUNT."
-      exit 1
-    fi
-    echo ">> [$c] ${#SHARDS[@]} ACAF shards visible under the mount (pull mode: mount)"
+    dl_to "${AOU_PGEN_GS}/${c}.pvar" "${PFX}.pvar"
   fi
 
-  # --- bracket shards for contig c (first-contig order via tabix -l) ---
-  local want; want="$(corder "$c")"
-  local L R; L="$(_lb "$want")"; R="$(_lb $((want + 1)))"
-  local lo_i=$(( L - 1 < 0 ? 0 : L - 1 )) hi_i=$(( R < ${#SHARDS[@]} ? R : ${#SHARDS[@]} - 1 ))
-  echo ">> [$c] shard bracket [${lo_i}..${hi_i}] of ${#SHARDS[@]}"
-  local sel=() i
-  for (( i=lo_i; i<=hi_i; i++ )); do sel+=("$i"); done
+  # --- plink2: keep the 198, export to VCF (REF/ALT + multiallelics preserved; IID sample names) ---
+  local EXP="${LOCAL}/${TARGET_BASE}_${c}.acaf"
+  echo ">> [$c] plink2 --keep 198 --export vcf (${THREADS} threads)"
+  plink2 --pfile "${PFX}" ${VZS} \
+         --keep "${KEEP}" \
+         --output-chr chrM \
+         --export vcf bgz id-paste=iid \
+         --threads "${THREADS}" \
+         --out "${EXP}"
+  [ -s "${EXP}.vcf.gz" ] || { echo "ERROR: [$c] plink2 export produced no VCF (${EXP}.vcf.gz)"; exit 1; }
 
-  # --- per-shard parallel extract: 198 samples, SPLIT multiallelics -> biallelic (idempotent .tmp -> mv) ---
-  # bcftools norm -m -any decomposes multiallelic ACAF sites into biallelic records and recodes GTs
-  # (a het-of-two-alts 1/2 -> 1/0 in one record, 0/1 in the other; biallelic-valid). We deliberately do
-  # NOT pre-filter -v snps here: padded SNVs from a split (e.g. AT>AG) stay len>1 and would be dropped by
-  # -v snps, but the projection's minimal-rep reduces them to a SNV and matches. (pipefail: a mid-stream
-  # read error fails the whole pipe and the until-loop retries.)
-  local PARTS="${LOCAL}/target_parts_${c}"; mkdir -p "$PARTS"
+  # --- keep PASS sites, split multiallelics -> biallelic (GT recode) = the raw ACAF target ---
+  # norm -m -any decomposes multiallelic sites and recodes GTs (1/2 -> 1/0 & 0/1; biallelic-valid).
+  # No -v snps prefilter: split padded SNVs stay len>1 but the projection's minimal-rep matches them.
+  local filt=(); [ -n "${TARGET_FILTER}" ] && filt=(-f "${TARGET_FILTER}")
+  bcftools view "${filt[@]}" "${EXP}.vcf.gz" -Ou \
+    | bcftools norm -m -any --threads "${THREADS}" -Oz -o "${ACAF}.tmp"
+  mv "${ACAF}.tmp" "$ACAF"
+  rm -f "${EXP}.vcf.gz" "${EXP}.log" "${PFX}.pgen" "${PFX}.pvar" "${PFX}.pvar.zst" "${PFX}.psam"   # free disk (~100GB pgen)
 
-  _extract_part() {                          # $1=shard-index $2=reader-path -> writes PARTS part (idempotent)
-    local i="$1" reader="$2" part a=1 filt=()
-    part="${PARTS}/part_$(printf '%010d' "$i").vcf.gz"
-    [ -n "${TARGET_FILTER}" ] && filt=(-f "${TARGET_FILTER}")   # keep only PASS sites (site FILTER)
-    until bcftools view "${filt[@]}" -r "$c" -S "$SAMP_LOC" --force-samples --threads "${SHARD_THREADS}" "$reader" -Ou \
-            | bcftools norm -m -any --threads "${SHARD_THREADS}" -Oz -o "${part}.tmp"; do
-      rm -f "${part}.tmp"
-      [ "$a" -ge "${GS_RETRIES}" ] && { echo ">> [$c] shard idx $i extract FAILED after ${a} tries" >&2; return 1; }
-      echo ">> [$c] shard idx $i extract retry ${a}/${GS_RETRIES}; sleep $((a*5))s" >&2
-      sleep "$((a*5))"; a=$((a+1))
-    done
-    mv "${part}.tmp" "$part"
-  }
-
-  if [ "${TARGET_PULL_MODE}" = "copy" ]; then
-    # --- prefetch buffer: a downloader pulls shards (gcloud storage cp) a little AHEAD of the
-    #     reader into a bounded buffer, so bcftools never waits on the network. The bucket .tbi/.csi
-    #     index is downloaded alongside each shard and used for the -r region query. Backpressure
-    #     keeps at most PREFETCH downloaded-but-unread shards on disk; DL_PARALLEL download at once
-    #     -> peak local disk ~= (PREFETCH + DL_PARALLEL) * shard_size (freed right after each read). ---
-    local BUF="${LOCAL}/acaf_buf_${c}"; rm -rf "$BUF"; mkdir -p "$BUF"
-
-    # producer: download shard + its index ahead of the reader (in order, DL_PARALLEL concurrent)
-    (
-      for i in "${sel[@]}"; do
-        [ -s "${PARTS}/part_$(printf '%010d' "$i").vcf.gz" ] && continue   # already extracted (resume)
-        # backpressure: don't run more than PREFETCH ahead of the reader
-        while [ "$(( $(ls "${BUF}"/*.dl.ok 2>/dev/null | wc -l) - $(ls "${BUF}"/*.rd.ok 2>/dev/null | wc -l) ))" -ge "${PREFETCH}" ]; do sleep 0.5; done
-        while [ "$(jobs -rp | wc -l)" -ge "${DL_PARALLEL}" ]; do wait -n 2>/dev/null || break; done
-        dl="${BUF}/$(printf '%010d' "$i")"; shard="${SHARDS[$i]}"
-        (
-          set +e
-          acaf_cp "$shard" "${dl}.vcf.bgz.part" && mv "${dl}.vcf.bgz.part" "${dl}.vcf.bgz"; rc=$?
-          if [ "$rc" -eq 0 ]; then                                  # fetch the bucket index (.tbi or .csi)
-            if   acaf_cp "${shard}.tbi" "${dl}.idx.part" 2>/dev/null; then mv "${dl}.idx.part" "${dl}.vcf.bgz.tbi"
-            elif acaf_cp "${shard}.csi" "${dl}.idx.part" 2>/dev/null; then mv "${dl}.idx.part" "${dl}.vcf.bgz.csi"
-            else tabix -f -p vcf "${dl}.vcf.bgz"; rc=$?; fi
-          fi
-          [ "$rc" -eq 0 ] && touch "${dl}.dl.ok" || touch "${dl}.dl.fail"
-        ) &
-      done
-      wait
-    ) &
-    local DL_PID=$!; disown "$DL_PID" 2>/dev/null || true   # keep it out of the consumer's `wait -n`
-
-    # consumer: extract each shard as soon as its download lands, then free its buffer slot
-    local running=0 i dl
-    for i in "${sel[@]}"; do
-      [ -s "${PARTS}/part_$(printf '%010d' "$i").vcf.gz" ] && continue
-      dl="${BUF}/$(printf '%010d' "$i")"
-      while [ ! -e "${dl}.dl.ok" ]; do
-        [ -e "${dl}.dl.fail" ] && { echo ">> [$c] shard idx $i download FAILED" >&2; kill "$DL_PID" 2>/dev/null; exit 1; }
-        kill -0 "$DL_PID" 2>/dev/null || { [ -e "${dl}.dl.ok" ] || { echo ">> [$c] downloader exited before shard idx $i" >&2; exit 1; }; }
-        sleep 0.5
-      done
-      (
-        _extract_part "$i" "${dl}.vcf.bgz" || { rm -f "${dl}".* ; touch "${dl}.rd.ok"; exit 1; }
-        rm -f "${dl}.vcf.bgz" "${dl}.vcf.bgz.tbi" "${dl}.vcf.bgz.csi"   # free disk
-        touch "${dl}.rd.ok"                                            # release a buffer slot
-      ) &
-      running=$(( running + 1 ))
-      if [ "$running" -ge "${PARALLEL}" ]; then wait -n 2>/dev/null || wait; running=$(( running - 1 )); fi
-    done
-    wait
-    while kill -0 "$DL_PID" 2>/dev/null; do sleep 0.2; done    # producer is done once all reads completed
-    rm -rf "$BUF"
-  else
-    # mount mode: read shards in place over the gcsfuse mount (original behavior)
-    local running=0 i
-    for i in "${sel[@]}"; do
-      [ -s "${PARTS}/part_$(printf '%010d' "$i").vcf.gz" ] && continue
-      ( _extract_part "$i" "${SHARDS[$i]}" || exit 1 ) &
-      running=$(( running + 1 ))
-      if [ "$running" -ge "${PARALLEL}" ]; then wait -n 2>/dev/null || wait; running=$(( running - 1 )); fi
-    done
-    wait
-  fi
-
-  # --- collect parts in order, concat to the raw ACAF target ---
-  local PARTLIST=()
-  for i in "${sel[@]}"; do
-    part="${PARTS}/part_$(printf '%010d' "$i").vcf.gz"
-    [ -s "$part" ] || { echo "ERROR: missing part for shard index $i ($part); rerun to resume"; exit 1; }
-    PARTLIST+=("$part")
-  done
-  bcftools concat --threads "${MERGE_THREADS}" -Oz -o "${ACAF}.tmp" "${PARTLIST[@]}" && mv "${ACAF}.tmp" "$ACAF"
   local NS; NS="$(bcftools query -l "$ACAF" | wc -l)"
-  [ "$NS" -gt 0 ] || { echo "ERROR: 0 of the requested ids found in ACAF (id namespace mismatch between panel/truth and ACAF? provide AOU_SAMPLES with ACAF-matching ids)"; exit 1; }
+  [ "$NS" -gt 0 ] || { echo "ERROR: 0 of the requested ids found in ACAF PGEN (id namespace mismatch between panel/truth and ACAF? provide AOU_SAMPLES with ACAF-matching ids)"; exit 1; }
   echo ">> [$c] ACAF SNVs (pre-projection): $(bcftools index -n "$ACAF" 2>/dev/null || echo '?') records x ${NS} samples"
 }
 
@@ -509,8 +376,8 @@ for c in "${CONTIGS[@]}"; do
   echo "===================== ${c} ====================="
   resolve_panel "$c"
   if [ "${TARGET_CONCURRENT}" = "true" ]; then
-    # ACAF shard pulls (network-bound) overlap the CPU-bound panel prep + bref3 build (the slow
-    # part that was blocking the copies). The pull needs only TRUTH_AOU + the mount, not the panel.
+    # ACAF PGEN pull+export (download + plink2) overlaps the CPU-bound panel prep + bref3 build.
+    # The pull needs only TRUTH_AOU + the ACAF PGEN, not the panel.
     echo ">> [$c] launching ACAF target pull in background; building reference concurrently"
     pull_acaf_target "$c" & _acaf_pid=$!
     prep_panel "$c"
