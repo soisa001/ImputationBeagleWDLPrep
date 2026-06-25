@@ -52,8 +52,11 @@ scripts/
 
 - `truth.aou.chr1.bcf` (+ `.csi`): the 198's full-panel genotypes (your `check_holdout_panel.sh` Step A).
   Used to derive the 198 id list and as the eval truth. Defaults to `gs://cloned-rw-migration-aou-rw-f178dfde-wb-sharp-papaya-7463/vcf/truth.aou.chr1.bcf`; override with `TRUTH_AOU=`.
-- ACAF gcsfuse mount (default `~/workspace/vwb-aou-datasets-controlled/v8/wgs/short_read/snpindel/acaf_threshold/vcf`),
-  or set `AOU_VCF_MOUNT`.
+- ACAF shards. By default (`TARGET_PULL_MODE=copy`) they are `gsutil cp`'d straight from
+  `gs://vwb-aou-datasets-controlled/.../acaf_threshold/vcf` (override `AOU_VCF_GS`) to local
+  SSD — no gcsfuse mount needed, and faster than reading in place. Set `TARGET_PULL_MODE=mount`
+  to instead read the gcsfuse mount at `AOU_VCF_MOUNT` (default
+  `~/workspace/vwb-aou-datasets-controlled/v8/wgs/short_read/snpindel/acaf_threshold/vcf`).
 - Leaveout / sites-only / id-split panels are pulled from `gs://rw-long-reads-transfer-2026-06-17/…` automatically.
 
 `.gitignore` blocks all VCF/BCF/BED/binary artifacts so controlled data is never committed.
@@ -103,7 +106,9 @@ pre-build (e.g. to build once before launching); the prep does the same automati
 | `POP_BUILD_DIR` | `~/pop-build` | where the pop binary is built/cached (idempotent reuse) |
 | `TRUTH_AOU` | `gs://cloned-rw-migration-aou-rw-f178dfde-wb-sharp-papaya-7463/vcf/truth.aou.chr1.bcf` | 198 full-panel genotypes (id source + eval truth) |
 | `AOU_SAMPLES` | (derive from TRUTH_AOU) | explicit 198 id list (local/gs) |
-| `AOU_VCF_MOUNT` | acaf_threshold `vcf/` | gcsfuse mount of ACAF shards |
+| `TARGET_PULL_MODE` | `copy` | `copy` = `gsutil cp` each bracketed ACAF shard to local SSD then run bcftools locally (sliced parallel download, no FUSE; needs only `AOU_VCF_GS` + local disk ~`PARALLEL`×shard, each removed right after extract). `mount` = read in place over the gcsfuse `AOU_VCF_MOUNT`. |
+| `AOU_VCF_GS` | acaf_threshold `vcf/` gs:// dir | ACAF shard source for `copy` mode (lists `*.vcf.bgz`) |
+| `AOU_VCF_MOUNT` | acaf_threshold `vcf/` | gcsfuse mount of ACAF shards (only used when `TARGET_PULL_MODE=mount`) |
 | `PROJECT_LOCAL` | (auto-detect) | path to project_to_panel_rep.py |
 | `CONTIGS` | `chr1` | contig(s) |
 | `ENABLE_POP` | `true` | emit popped output |
