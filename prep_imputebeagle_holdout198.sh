@@ -149,6 +149,10 @@ TARGET_PULL_MODE="${TARGET_PULL_MODE:-copy}"
 # downloaded-but-unread -> peak local disk ~= (PREFETCH + DL_PARALLEL) * shard_size.
 DL_PARALLEL="${DL_PARALLEL:-${PARALLEL}}"
 PREFETCH="${PREFETCH:-$(( PARALLEL + 2 ))}"
+# keep only ACAF sites whose FILTER passes this list (bcftools -f). Default PASS = drop any
+# non-PASS site (incl. FILTER="."). Set TARGET_FILTER="PASS,." to also keep unfiltered sites,
+# or TARGET_FILTER= (empty) to disable site filtering.
+TARGET_FILTER="${TARGET_FILTER-PASS}"
 IDEMPOTENT="${IDEMPOTENT:-true}"
 
 # ============================ preflight ======================================
@@ -375,9 +379,10 @@ pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic tar
   local PARTS="${LOCAL}/target_parts_${c}"; mkdir -p "$PARTS"
 
   _extract_part() {                          # $1=shard-index $2=reader-path -> writes PARTS part (idempotent)
-    local i="$1" reader="$2" part a=1
+    local i="$1" reader="$2" part a=1 filt=()
     part="${PARTS}/part_$(printf '%010d' "$i").vcf.gz"
-    until bcftools view -r "$c" -S "$SAMP_LOC" --force-samples --threads "${SHARD_THREADS}" "$reader" -Ou \
+    [ -n "${TARGET_FILTER}" ] && filt=(-f "${TARGET_FILTER}")   # keep only PASS sites (site FILTER)
+    until bcftools view "${filt[@]}" -r "$c" -S "$SAMP_LOC" --force-samples --threads "${SHARD_THREADS}" "$reader" -Ou \
             | bcftools norm -m -any --threads "${SHARD_THREADS}" -Oz -o "${part}.tmp"; do
       rm -f "${part}.tmp"
       [ "$a" -ge "${GS_RETRIES}" ] && { echo ">> [$c] shard idx $i extract FAILED after ${a} tries" >&2; return 1; }
