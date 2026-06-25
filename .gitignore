@@ -1,0 +1,32 @@
+# ---- controlled-access data (NEVER commit AoU data) ----
+*.bcf
+*.bcf.csi
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.vcf.bgz
+*.bref3
+*.tsv.gz
+truth.aou*
+holdout*.samples
+panel_sites.*
+*.bed
+*.bed.gz
+*.bed.gz.tbi
+
+# ---- build artifacts / binaries ----
+target/
+pop-build/
+minrep_equiv/minrep_cli
+*.o
+*.rlib
+Cargo.lock
+__pycache__/
+*.pyc
+
+# ---- run outputs / logs / scratch ----
+*.log
+imp_holdout198/
+*_parts_*/
+nohup.out
+.ipynb_checkpoints/

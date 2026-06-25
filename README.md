@@ -1,0 +1,118 @@
+# aou-lrwgs-imputebeagle-holdout
+
+Leave-N-out (chr1) benchmark of **ACAF short-read → AoU lrWGS Phase-2 panel**
+imputation with Beagle, on Verily Workbench / All of Us controlled tier.
+
+The 198 held-out AoU samples' **real ACAF short-read SNVs** are projected onto the
+panel's bubble-allele representation, imputed against the **leaveout** panel
+(bref3), the imputed bubbles are popped to constituent variants, and the result is
+scored against those samples' **full-panel** long-read genotypes — i.e. empirical
+ACAF→panel imputation accuracy, not an optimistic panel-derived target.
+
+## Layout
+
+```
+prep_imputebeagle_holdout198.sh     # STEP 1: reference (bref3) + ACAF target (split+project) + register + run
+prep_eval_holdout198.sh             # STEP 3: GLIMPSE2Concordance + GLIMPSE2Summarize on the imputed output
+project_to_panel_rep.py             # minimal-rep projection of ACAF SNVs onto panel alleles (multiallelic-aware)
+test_bubble_representation_matching.py   # optional: quantify exact vs min-rep scaffold reach
+
+imputationbeagle_wdl_flat/          # main workflow bundle (import closure = these 4)
+    ImputeBeagleWithPop.wdl
+    ImputationBeagleStructs.wdl
+    ImputationTasks.wdl
+    ImputationBeagleTasks.wdl       # contains the Rust pop task (PopAndMarginalizeCollisions)
+
+glimpse2_eval_wdl/                  # eval workflows (single-file each)
+    GLIMPSE2Concordance.wdl
+    GLIMPSE2Summarize.wdl
+
+pop_glimpse2_rust/                  # pop engine source (build once -> static musl binary)
+    pop-glimpse2.rs
+    Cargo.toml
+
+minrep_equiv/                       # optional: prove the Python projection's matching == the Rust minrep
+    minrep_cli.rs
+    check_minrep_equivalence.py
+
+scripts/
+    build_pop_binary.sh             # builds the static-musl pop-glimpse2 binary (no sudo/docker)
+```
+
+**Run the prep scripts from the repo root** — they auto-detect
+`./imputationbeagle_wdl_flat`, `./project_to_panel_rep.py`, and
+`./glimpse2_eval_wdl`.
+
+## Prerequisites on the workbench app
+
+- `bcftools`, `tabix`, `bgzip`, `gsutil`, `java`, `python3`, `wb` CLI, `rustc` (for the pop binary).
+- The clone workspace bucket resolves via `wb resource resolve --name rw-migration-aou-rw-f178dfde`.
+
+## Data NOT in this repo (controlled access — supply on the VM)
+
+- `truth.aou.chr1.bcf` (+ `.csi`): the 198's full-panel genotypes (your `check_holdout_panel.sh` Step A).
+  Used to derive the 198 id list and as the eval truth. Default path `./truth.aou.chr1.bcf`, or set `TRUTH_AOU=gs://…`.
+- ACAF gcsfuse mount (default `~/workspace/vwb-aou-datasets-controlled/v8/wgs/short_read/snpindel/acaf_threshold/vcf`),
+  or set `AOU_VCF_MOUNT`.
+- Leaveout / sites-only / id-split panels are pulled from `gs://rw-long-reads-transfer-2026-06-17/…` automatically.
+
+`.gitignore` blocks all VCF/BCF/BED/binary artifacts so controlled data is never committed.
+
+## Run order
+
+```bash
+# (optional) prove the projection's matching logic == the Rust minrep
+#   (the checker auto-builds minrep_cli from minrep_cli.rs if rustc is present)
+( cd minrep_equiv && python3 check_minrep_equivalence.py )
+
+# 1) prep + launch imputation (idempotent; reruns skip staged artifacts).
+#    The prep BUILDS the static-musl pop-glimpse2 binary itself from pop_glimpse2_rust/
+#    (the in-task cargo build can't reach crates.io inside the perimeter). Reuses an
+#    existing build at ~/pop-build. Pass POP_BINARY_LOCAL=<path> to skip the build.
+nohup bash prep_imputebeagle_holdout198.sh > holdout198_prep.log 2>&1 &
+tail -f holdout198_prep.log
+#   watch for: ">> building pop-glimpse2 (static ...)" then ">> built pop-glimpse2 locally: ...",
+#              "target samples: 198 ...",
+#              "[project] in(alleles)=... exact=... recovered=... dropped=..."
+
+# 2) monitor the workflow to completion
+wb workflow job list | head
+#   on success two outputs land under .../imputebeagle-holdout198-run/:
+#     aou_holdout198_chr1.imputed.vcf.gz         (un-popped, bubble.split)
+#     aou_holdout198_chr1.imputed.popped.vcf.gz  (popped, constituent variants)
+
+# 3) eval the un-popped output vs full-panel truth (no required inputs)
+nohup bash prep_eval_holdout198.sh > holdout198_eval.log 2>&1 &
+tail -f holdout198_eval.log
+
+# 3b) later: popped eval (truth side should become the id-split panel; current wiring is for un-popped)
+# POPPED=true bash prep_eval_holdout198.sh
+```
+
+The first imputation run incurs a one-time rust toolchain install (user-local rustup) + pop
+build; later runs reuse `~/pop-build`. `scripts/build_pop_binary.sh` is an optional standalone
+pre-build (e.g. to build once before launching); the prep does the same automatically.
+
+## Key env overrides
+
+| var | default | meaning |
+|-----|---------|---------|
+| `POP_BINARY_LOCAL` | (unset → prep builds it) | prebuilt pop-glimpse2 binary; if unset the prep builds a static-musl one from `pop_glimpse2_rust/` |
+| `POP_BUILD_LOCAL` | `true` | build the pop binary locally in the prep (set `false` to fall back to the in-task source build) |
+| `POP_BUILD_DIR` | `~/pop-build` | where the pop binary is built/cached (idempotent reuse) |
+| `TRUTH_AOU` | `truth.aou.chr1.bcf` | 198 full-panel genotypes (id source + eval truth) |
+| `AOU_SAMPLES` | (derive from TRUTH_AOU) | explicit 198 id list (local/gs) |
+| `AOU_VCF_MOUNT` | acaf_threshold `vcf/` | gcsfuse mount of ACAF shards |
+| `PROJECT_LOCAL` | (auto-detect) | path to project_to_panel_rep.py |
+| `CONTIGS` | `chr1` | contig(s) |
+| `ENABLE_POP` | `true` | emit popped output |
+
+## Notes
+
+- Multiallelic ACAF sites are split (`bcftools norm -m -any`, and the projection splits
+  internally too) with GT recoding; only SNV-equivalent alleles (true + padded) are scaffolded —
+  indels/MNVs are imputed, not scaffolded.
+- The eval WDLs fetch tools at runtime (concordance binary via wget, cyvcf2 via conda); if the
+  VPC-SC perimeter blocks that, switch them to a prebuilt/offline approach.
+- Sample-id namespace must match between panel/truth and ACAF; the prep errors if 0 of the 198 are
+  found and reports the count otherwise.
