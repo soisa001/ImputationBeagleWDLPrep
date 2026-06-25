@@ -43,8 +43,12 @@ fi
 PROJECT="${GOOGLE_CLOUD_PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}"
 AOU_USER_PROJECT="${AOU_USER_PROJECT:-${PROJECT}}"   # billing project for requester-pays reads
 
-WORK="${BUCKET}/imp_holdout198"                  # separate workspace dir from the production run
-LOCAL="${HOME}/imp_holdout198"
+# Run namespace. Bump RUN_ID (or pass RUN_ID=...) for a FRESH run that does NOT reuse
+# previously staged artifacts or call-cached workflow outputs: it changes the gs://
+# staging dir, the registered workflow name, and the run output path together.
+RUN_ID="${RUN_ID:-holdout198_v2}"
+WORK="${BUCKET}/imp_${RUN_ID}"                   # separate workspace dir from the production run
+LOCAL="${HOME}/imp_${RUN_ID}"
 
 CONTIGS=(${CONTIGS:-chr1})                        # held-out eval is chr1
 
@@ -81,10 +85,10 @@ OUT_BASE="${OUT_BASE:-aou_holdout198_${CONTIGS[0]}}"   # workflow output_basenam
 
 # ---- workflow registration + run (shares the ImputeBeagleWithPop WDL; pop OFF) ----
 RUN_WORKFLOW="${RUN_WORKFLOW:-true}"
-WF_NAME="${WF_NAME:-ImputeBeagleWithPop}"
+WF_NAME="${WF_NAME:-ImputeBeagleWithPop_${RUN_ID}}"   # distinct name -> fresh registration, no call-cache collision
 MAIN_WDL="${MAIN_WDL:-ImputeBeagleWithPop.wdl}"
 FORCE_WF_REGISTER="${FORCE_WF_REGISTER:-false}"
-RUN_TAG="${RUN_TAG:-holdout198}"
+RUN_TAG="${RUN_TAG:-${RUN_ID}}"
 OUTPUT_PATH="${OUTPUT_PATH:-imputebeagle-${RUN_TAG}-run}"   # runs land at gs://<bucket>/<OUTPUT_PATH>/ImputeBeagleWithPop/<uuid>/
 USE_BATCH_CSV="${USE_BATCH_CSV:-true}"
 SAMPLE_CHUNK_SIZE="${SAMPLE_CHUNK_SIZE:-1000}"   # 198 <= 1000 -> single sample chunk

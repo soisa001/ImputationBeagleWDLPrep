@@ -77,7 +77,7 @@ tail -f holdout198_prep.log
 
 # 2) monitor the workflow to completion
 wb workflow job list | head
-#   on success two outputs land under .../imputebeagle-holdout198-run/:
+#   on success two outputs land under .../imputebeagle-${RUN_ID}-run/ (default RUN_ID=holdout198_v2):
 #     aou_holdout198_chr1.imputed.vcf.gz         (un-popped, bubble.split)
 #     aou_holdout198_chr1.imputed.popped.vcf.gz  (popped, constituent variants)
 
@@ -97,6 +97,7 @@ pre-build (e.g. to build once before launching); the prep does the same automati
 
 | var | default | meaning |
 |-----|---------|---------|
+| `RUN_ID` | `holdout198_v2` | run namespace. Bump it for a **fresh run**: changes the gs:// staging dir (`imp_<RUN_ID>/`), the registered workflow name (`ImputeBeagleWithPop_<RUN_ID>`), and the run output path (`imputebeagle-<RUN_ID>-run`) together, so nothing reuses previously staged/cached artifacts. Set the same `RUN_ID` for `prep_eval_holdout198.sh`. |
 | `POP_BINARY_LOCAL` | (unset → prep builds it) | prebuilt pop-glimpse2 binary; if unset the prep builds a static-musl one from `pop_glimpse2_rust/` |
 | `POP_BUILD_LOCAL` | `true` | build the pop binary locally in the prep (set `false` to fall back to the in-task source build) |
 | `POP_BUILD_DIR` | `~/pop-build` | where the pop binary is built/cached (idempotent reuse) |

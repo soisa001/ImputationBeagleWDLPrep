@@ -42,8 +42,10 @@ fi
 PROJECT="${GOOGLE_CLOUD_PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}"
 AOU_USER_PROJECT="${AOU_USER_PROJECT:-${PROJECT}}"
 
-WORK="${BUCKET}/imp_holdout198"
-LOCAL="${HOME}/imp_holdout198"
+# Must match the imputation prep's RUN_ID so the eval reads the fresh run's outputs.
+RUN_ID="${RUN_ID:-holdout198_v2}"
+WORK="${BUCKET}/imp_${RUN_ID}"
+LOCAL="${HOME}/imp_${RUN_ID}"
 EVAL_WORK="${WORK}/eval"                          # gs:// staging for site-matched panel
 REGION="${REGION:-chr1}"
 OUT_PREFIX="${OUT_PREFIX:-aou_holdout198_chr1}"
@@ -54,7 +56,7 @@ OUT_PREFIX="${OUT_PREFIX:-aou_holdout198_chr1}"
 # panel truth). Set POPPED=true later to score the popped output (imputed_popped_vcf).
 IMPUTED_VCF="${IMPUTED_VCF:-}"
 POPPED="${POPPED:-false}"
-HOLDOUT_OUTPUT_PATH="${HOLDOUT_OUTPUT_PATH:-imputebeagle-holdout198-run}"
+HOLDOUT_OUTPUT_PATH="${HOLDOUT_OUTPUT_PATH:-imputebeagle-${RUN_ID}-run}"
 OUT_BASE="${OUT_BASE:-aou_holdout198_${REGION}}"  # the imputation output_basename -> <OUT_BASE>.imputed[.popped].vcf.gz
 
 # ---- truth/freq panel (FULL panel) ----
