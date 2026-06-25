@@ -134,7 +134,7 @@ THREADS="${THREADS:-$(nproc 2>/dev/null || echo 8)}"
 # TARGET_PULL_MODE=copy each bracketed shard is gsutil-cp'd to local SSD first (sliced
 # parallel download, no FUSE), so peak local disk ~= PARALLEL * shard_size (each shard is
 # removed right after its part is written). Lower PARALLEL if local disk is tight.
-SHARD_THREADS="${SHARD_THREADS:-4}"   # per-shard bcftools view|norm threads (PARALLEL shards run at once)
+SHARD_THREADS="${SHARD_THREADS:-1}"   # threads per shard; PARALLEL=THREADS/SHARD_THREADS shards at once -> one shard per thread
 PARALLEL="${PARALLEL:-$(( THREADS/SHARD_THREADS > 0 ? THREADS/SHARD_THREADS : 1 ))}"
 MERGE_THREADS="${MERGE_THREADS:-${THREADS}}"
 TARGET_CONCURRENT="${TARGET_CONCURRENT:-true}"   # overlap ACAF shard pulls with panel prep + bref3 build
