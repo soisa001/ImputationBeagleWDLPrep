@@ -106,7 +106,9 @@ pre-build (e.g. to build once before launching); the prep does the same automati
 | `POP_BUILD_DIR` | `~/pop-build` | where the pop binary is built/cached (idempotent reuse) |
 | `TRUTH_AOU` | `gs://cloned-rw-migration-aou-rw-f178dfde-wb-sharp-papaya-7463/vcf/truth.aou.chr1.bcf` | 198 full-panel genotypes (id source + eval truth) |
 | `AOU_SAMPLES` | (derive from TRUTH_AOU) | explicit 198 id list (local/gs) |
-| `TARGET_PULL_MODE` | `copy` | `copy` = `gsutil cp` each bracketed ACAF shard to local SSD then run bcftools locally (sliced parallel download, no FUSE; needs only `AOU_VCF_GS` + local disk ~`PARALLEL`×shard, each removed right after extract). `mount` = read in place over the gcsfuse `AOU_VCF_MOUNT`. |
+| `TARGET_PULL_MODE` | `copy` | `copy` = a prefetch buffer downloads each bracketed ACAF shard **a little ahead of the reader** with `gcloud storage cp` (plus the bucket `.tbi`/`.csi` index, used for the `-r` region query) into local SSD, then runs bcftools locally and frees each shard right after — so bcftools never waits on the network. Needs only `AOU_VCF_GS` (no mount). `mount` = read in place over the gcsfuse `AOU_VCF_MOUNT`. |
+| `DL_PARALLEL` | `=PARALLEL` | copy mode: concurrent shard downloads |
+| `PREFETCH` | `PARALLEL+2` | copy mode: max shards downloaded-but-unread held ahead of the reader. Peak local disk ≈ `(PREFETCH + DL_PARALLEL)` × shard; lower these (or `PARALLEL`) if disk is tight |
 | `AOU_VCF_GS` | acaf_threshold `vcf/` gs:// dir | ACAF shard source for `copy` mode (lists `*.vcf.bgz`) |
 | `AOU_VCF_MOUNT` | acaf_threshold `vcf/` | gcsfuse mount of ACAF shards (only used when `TARGET_PULL_MODE=mount`) |
 | `PROJECT_LOCAL` | (auto-detect) | path to project_to_panel_rep.py |

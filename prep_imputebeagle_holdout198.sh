@@ -144,6 +144,11 @@ TARGET_CONCURRENT="${TARGET_CONCURRENT:-true}"   # overlap ACAF shard pulls with
 # regardless, and the bracketed shards are ~whole-file for the contig, so copy (parallel
 # object download) beats gcsfuse streaming + .tbi random reads.
 TARGET_PULL_MODE="${TARGET_PULL_MODE:-copy}"
+# copy-mode prefetch buffer: a downloader pulls shards a little ahead of the reader so bcftools
+# never waits on the network. DL_PARALLEL concurrent downloads; at most PREFETCH shards held
+# downloaded-but-unread -> peak local disk ~= (PREFETCH + DL_PARALLEL) * shard_size.
+DL_PARALLEL="${DL_PARALLEL:-${PARALLEL}}"
+PREFETCH="${PREFETCH:-$(( PARALLEL + 2 ))}"
 IDEMPOTENT="${IDEMPOTENT:-true}"
 
 # ============================ preflight ======================================
@@ -165,7 +170,7 @@ retry() {
 }
 
 # --- ACAF (requester-pays) transport helpers: copy-to-local instead of the gcsfuse mount ---
-acaf_cp()  { retry gsutil -u "${AOU_USER_PROJECT}" cp "$1" "$2"; }   # gs:// -> local (sliced parallel dl for big objects)
+acaf_cp()  { retry gcloud storage cp --billing-project="${AOU_USER_PROJECT}" "$1" "$2"; }  # gs:// -> local (parallel striped dl)
 acaf_cat() { gsutil -u "${AOU_USER_PROJECT}" cat "$1"; }            # gs:// -> stdout (streamed; caller may early-close)
 acaf_ls()  { gsutil -u "${AOU_USER_PROJECT}" ls "$1"; }            # list a gs:// prefix (full gs:// urls)
 
@@ -366,41 +371,85 @@ pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic tar
   # (a het-of-two-alts 1/2 -> 1/0 in one record, 0/1 in the other; biallelic-valid). We deliberately do
   # NOT pre-filter -v snps here: padded SNVs from a split (e.g. AT>AG) stay len>1 and would be dropped by
   # -v snps, but the projection's minimal-rep reduces them to a SNV and matches. (pipefail: a mid-stream
-  # GCS read error fails the whole pipe and the until-loop retries.)
+  # read error fails the whole pipe and the until-loop retries.)
   local PARTS="${LOCAL}/target_parts_${c}"; mkdir -p "$PARTS"
-  local SHTMP="${LOCAL}/acaf_shard_tmp_${c}"; [ "${TARGET_PULL_MODE}" = "copy" ] && mkdir -p "$SHTMP"
-  local running=0 part
-  for i in "${sel[@]}"; do
+
+  _extract_part() {                          # $1=shard-index $2=reader-path -> writes PARTS part (idempotent)
+    local i="$1" reader="$2" part a=1
     part="${PARTS}/part_$(printf '%010d' "$i").vcf.gz"
-    [ -s "$part" ] && continue
+    until bcftools view -r "$c" -S "$SAMP_LOC" --force-samples --threads "${SHARD_THREADS}" "$reader" -Ou \
+            | bcftools norm -m -any --threads "${SHARD_THREADS}" -Oz -o "${part}.tmp"; do
+      rm -f "${part}.tmp"
+      [ "$a" -ge "${GS_RETRIES}" ] && { echo ">> [$c] shard idx $i extract FAILED after ${a} tries" >&2; return 1; }
+      echo ">> [$c] shard idx $i extract retry ${a}/${GS_RETRIES}; sleep $((a*5))s" >&2
+      sleep "$((a*5))"; a=$((a+1))
+    done
+    mv "${part}.tmp" "$part"
+  }
+
+  if [ "${TARGET_PULL_MODE}" = "copy" ]; then
+    # --- prefetch buffer: a downloader pulls shards (gcloud storage cp) a little AHEAD of the
+    #     reader into a bounded buffer, so bcftools never waits on the network. The bucket .tbi/.csi
+    #     index is downloaded alongside each shard and used for the -r region query. Backpressure
+    #     keeps at most PREFETCH downloaded-but-unread shards on disk; DL_PARALLEL download at once
+    #     -> peak local disk ~= (PREFETCH + DL_PARALLEL) * shard_size (freed right after each read). ---
+    local BUF="${LOCAL}/acaf_buf_${c}"; rm -rf "$BUF"; mkdir -p "$BUF"
+
+    # producer: download shard + its index ahead of the reader (in order, DL_PARALLEL concurrent)
     (
-      shard="${SHARDS[$i]}"      # mount path or gs:// url
-      reader="$shard"            # what bcftools actually reads
-      loc=""
-      if [ "${TARGET_PULL_MODE}" = "copy" ]; then
-        # cp the shard (+ its .tbi, for the -r region query) to local SSD; rm right after extract
-        loc="${SHTMP}/$(printf '%010d' "$i").vcf.bgz"
-        acaf_cp "$shard" "${loc}.part" || { echo ">> [$c] shard idx $i COPY FAILED" >&2; exit 1; }
-        mv "${loc}.part" "$loc"
-        gsutil -u "${AOU_USER_PROJECT}" cp "${shard}.tbi" "${loc}.tbi" 2>/dev/null || tabix -f -p vcf "$loc"
-        reader="$loc"
-      fi
-      a=1
-      until bcftools view -r "$c" -S "$SAMP_LOC" --force-samples --threads "${SHARD_THREADS}" "$reader" -Ou \
-              | bcftools norm -m -any --threads "${SHARD_THREADS}" -Oz -o "${part}.tmp"; do
-        rm -f "${part}.tmp"
-        [ "$a" -ge "${GS_RETRIES}" ] && { echo ">> [$c] shard idx $i FAILED after ${a} tries" >&2; [ -n "$loc" ] && rm -f "$loc" "${loc}.tbi"; exit 1; }
-        echo ">> [$c] shard idx $i retry ${a}/${GS_RETRIES} (read); sleep $((a*10))s" >&2
-        sleep "$((a*10))"; a=$((a+1))
+      for i in "${sel[@]}"; do
+        [ -s "${PARTS}/part_$(printf '%010d' "$i").vcf.gz" ] && continue   # already extracted (resume)
+        # backpressure: don't run more than PREFETCH ahead of the reader
+        while [ "$(( $(ls "${BUF}"/*.dl.ok 2>/dev/null | wc -l) - $(ls "${BUF}"/*.rd.ok 2>/dev/null | wc -l) ))" -ge "${PREFETCH}" ]; do sleep 0.5; done
+        while [ "$(jobs -rp | wc -l)" -ge "${DL_PARALLEL}" ]; do wait -n 2>/dev/null || break; done
+        dl="${BUF}/$(printf '%010d' "$i")"; shard="${SHARDS[$i]}"
+        (
+          set +e
+          acaf_cp "$shard" "${dl}.vcf.bgz.part" && mv "${dl}.vcf.bgz.part" "${dl}.vcf.bgz"; rc=$?
+          if [ "$rc" -eq 0 ]; then                                  # fetch the bucket index (.tbi or .csi)
+            if   acaf_cp "${shard}.tbi" "${dl}.idx.part" 2>/dev/null; then mv "${dl}.idx.part" "${dl}.vcf.bgz.tbi"
+            elif acaf_cp "${shard}.csi" "${dl}.idx.part" 2>/dev/null; then mv "${dl}.idx.part" "${dl}.vcf.bgz.csi"
+            else tabix -f -p vcf "${dl}.vcf.bgz"; rc=$?; fi
+          fi
+          [ "$rc" -eq 0 ] && touch "${dl}.dl.ok" || touch "${dl}.dl.fail"
+        ) &
       done
-      mv "${part}.tmp" "$part"
-      [ -n "$loc" ] && rm -f "$loc" "${loc}.tbi"     # free disk now: peak ~= PARALLEL shards on local SSD
+      wait
     ) &
-    running=$(( running + 1 ))
-    if [ "$running" -ge "${PARALLEL}" ]; then wait -n 2>/dev/null || wait; running=$(( running - 1 )); fi
-  done
-  wait
-  [ "${TARGET_PULL_MODE}" = "copy" ] && rmdir "$SHTMP" 2>/dev/null || true
+    local DL_PID=$!; disown "$DL_PID" 2>/dev/null || true   # keep it out of the consumer's `wait -n`
+
+    # consumer: extract each shard as soon as its download lands, then free its buffer slot
+    local running=0 i dl
+    for i in "${sel[@]}"; do
+      [ -s "${PARTS}/part_$(printf '%010d' "$i").vcf.gz" ] && continue
+      dl="${BUF}/$(printf '%010d' "$i")"
+      while [ ! -e "${dl}.dl.ok" ]; do
+        [ -e "${dl}.dl.fail" ] && { echo ">> [$c] shard idx $i download FAILED" >&2; kill "$DL_PID" 2>/dev/null; exit 1; }
+        kill -0 "$DL_PID" 2>/dev/null || { [ -e "${dl}.dl.ok" ] || { echo ">> [$c] downloader exited before shard idx $i" >&2; exit 1; }; }
+        sleep 0.5
+      done
+      (
+        _extract_part "$i" "${dl}.vcf.bgz" || { rm -f "${dl}".* ; touch "${dl}.rd.ok"; exit 1; }
+        rm -f "${dl}.vcf.bgz" "${dl}.vcf.bgz.tbi" "${dl}.vcf.bgz.csi"   # free disk
+        touch "${dl}.rd.ok"                                            # release a buffer slot
+      ) &
+      running=$(( running + 1 ))
+      if [ "$running" -ge "${PARALLEL}" ]; then wait -n 2>/dev/null || wait; running=$(( running - 1 )); fi
+    done
+    wait
+    while kill -0 "$DL_PID" 2>/dev/null; do sleep 0.2; done    # producer is done once all reads completed
+    rm -rf "$BUF"
+  else
+    # mount mode: read shards in place over the gcsfuse mount (original behavior)
+    local running=0 i
+    for i in "${sel[@]}"; do
+      [ -s "${PARTS}/part_$(printf '%010d' "$i").vcf.gz" ] && continue
+      ( _extract_part "$i" "${SHARDS[$i]}" || exit 1 ) &
+      running=$(( running + 1 ))
+      if [ "$running" -ge "${PARALLEL}" ]; then wait -n 2>/dev/null || wait; running=$(( running - 1 )); fi
+    done
+    wait
+  fi
 
   # --- collect parts in order, concat to the raw ACAF target ---
   local PARTLIST=()
