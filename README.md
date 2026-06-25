@@ -51,7 +51,7 @@ scripts/
 ## Data NOT in this repo (controlled access — supply on the VM)
 
 - `truth.aou.chr1.bcf` (+ `.csi`): the 198's full-panel genotypes (your `check_holdout_panel.sh` Step A).
-  Used to derive the 198 id list and as the eval truth. Default path `./truth.aou.chr1.bcf`, or set `TRUTH_AOU=gs://…`.
+  Used to derive the 198 id list and as the eval truth. Defaults to `gs://cloned-rw-migration-aou-rw-f178dfde-wb-sharp-papaya-7463/vcf/truth.aou.chr1.bcf`; override with `TRUTH_AOU=`.
 - ACAF gcsfuse mount (default `~/workspace/vwb-aou-datasets-controlled/v8/wgs/short_read/snpindel/acaf_threshold/vcf`),
   or set `AOU_VCF_MOUNT`.
 - Leaveout / sites-only / id-split panels are pulled from `gs://rw-long-reads-transfer-2026-06-17/…` automatically.
@@ -100,18 +100,21 @@ pre-build (e.g. to build once before launching); the prep does the same automati
 | `POP_BINARY_LOCAL` | (unset → prep builds it) | prebuilt pop-glimpse2 binary; if unset the prep builds a static-musl one from `pop_glimpse2_rust/` |
 | `POP_BUILD_LOCAL` | `true` | build the pop binary locally in the prep (set `false` to fall back to the in-task source build) |
 | `POP_BUILD_DIR` | `~/pop-build` | where the pop binary is built/cached (idempotent reuse) |
-| `TRUTH_AOU` | `truth.aou.chr1.bcf` | 198 full-panel genotypes (id source + eval truth) |
+| `TRUTH_AOU` | `gs://cloned-rw-migration-aou-rw-f178dfde-wb-sharp-papaya-7463/vcf/truth.aou.chr1.bcf` | 198 full-panel genotypes (id source + eval truth) |
 | `AOU_SAMPLES` | (derive from TRUTH_AOU) | explicit 198 id list (local/gs) |
 | `AOU_VCF_MOUNT` | acaf_threshold `vcf/` | gcsfuse mount of ACAF shards |
 | `PROJECT_LOCAL` | (auto-detect) | path to project_to_panel_rep.py |
 | `CONTIGS` | `chr1` | contig(s) |
 | `ENABLE_POP` | `true` | emit popped output |
+| `TARGET_CONCURRENT` | `true` | overlap the ACAF shard pulls with the panel prep + bref3 build |
 
 ## Notes
 
 - Multiallelic ACAF sites are split (`bcftools norm -m -any`, and the projection splits
   internally too) with GT recoding; only SNV-equivalent alleles (true + padded) are scaffolded —
   indels/MNVs are imputed, not scaffolded.
+- ACAF shard pulls run concurrently with the panel prep + bref3 build by default (`TARGET_CONCURRENT=true`);
+  the slow java bref3 build no longer blocks the shard copies. Set `TARGET_CONCURRENT=false` for the old serial order.
 - The eval WDLs fetch tools at runtime (concordance binary via wget, cyvcf2 via conda); if the
   VPC-SC perimeter blocks that, switch them to a prebuilt/offline approach.
 - Sample-id namespace must match between panel/truth and ACAF; the prep errors if 0 of the 198 are

@@ -54,7 +54,7 @@ PANEL_SRC_TMPL="${PANEL_SRC_TMPL-}"
 
 # TRUTH source for the 198 (their full-panel genotypes; from check_holdout_panel.sh Step A).
 # Used ONLY to build the sparse target. local path or gs://. Index (.csi/.tbi) expected alongside.
-TRUTH_AOU="${TRUTH_AOU:-truth.aou.chr1.bcf}"
+TRUTH_AOU="${TRUTH_AOU:-gs://cloned-rw-migration-aou-rw-f178dfde-wb-sharp-papaya-7463/vcf/truth.aou.chr1.bcf}"
 
 # ---- ACAF (short-read) target source ----------------------------------------
 # The 198 target is built from the SAME 198 held-out AoU samples' REAL short-read
@@ -130,6 +130,7 @@ THREADS="${THREADS:-$(nproc 2>/dev/null || echo 8)}"
 SHARD_THREADS="${SHARD_THREADS:-2}"
 PARALLEL="${PARALLEL:-$(( THREADS/SHARD_THREADS > 0 ? THREADS/SHARD_THREADS : 1 ))}"
 MERGE_THREADS="${MERGE_THREADS:-${THREADS}}"
+TARGET_CONCURRENT="${TARGET_CONCURRENT:-true}"   # overlap ACAF shard pulls with panel prep + bref3 build
 IDEMPOTENT="${IDEMPOTENT:-true}"
 
 # ============================ preflight ======================================
@@ -268,17 +269,20 @@ resolve_198_samples() {                    # $1=truth-local -> ${LOCAL}/holdout1
   echo "$S"
 }
 
-build_target_holdout() {                   # $1=contig -> 198 ACAF SNV target, PROJECTED onto panel rep
+pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic target (NETWORK phase; safe to run in background)
   local c="$1"
   local TGT="${TARGET_DIR}${TARGET_BASE}_${c}.snps.vcf.gz"
   if [ "${IDEMPOTENT}" = "true" ] && gs_exists "${TGT}" && gs_exists "${TGT}.tbi"; then
-    echo ">> [$c] target exists: ${TGT}"; return
+    echo ">> [$c] target exists: ${TGT} (skip ACAF pull)"; return
   fi
-  # The 198 held-out AoU samples' REAL short-read (ACAF) biallelic SNVs are
-  # extracted from the ACAF shards, then PROJECTED onto the leaveout panel's
-  # bubble-allele representation (minimal-rep matching: padded panel alleles like
-  # GAT/GGT become reachable by a minimal A/G call). GT only, UNPHASED. Reference
-  # = leaveout bref3; truth (eval) = full panel -> empirical ACAF->panel accuracy.
+  local ACAF="${LOCAL}/${TARGET_BASE}_${c}.acaf.snps.vcf.gz"
+  if [ -s "$ACAF" ] && [ "$(bcftools query -l "$ACAF" 2>/dev/null | wc -l)" -gt 0 ]; then
+    echo ">> [$c] ACAF concat exists, reusing: ${ACAF}"; return
+  fi
+  # The 198 held-out AoU samples' REAL short-read (ACAF) biallelic calls are extracted from the
+  # ACAF shards (multiallelics split, GTs recoded). This phase depends only on TRUTH_AOU (for the id
+  # list) and the gcsfuse mount -- NOT on the panel prep / bref3 build -- so it runs concurrently
+  # with them. The projection onto panel representation happens later in project_target.
 
   # --- resolve the 198 ids (default: TRUTH_AOU's sample list == the held-out set) ---
   local TA
@@ -293,20 +297,6 @@ build_target_holdout() {                   # $1=contig -> 198 ACAF SNV target, P
   [ -s "${TA}.csi" ] || [ -s "${TA}.tbi" ] || bcftools index "${TA}"
   local SAMP_LOC; SAMP_LOC="$(resolve_198_samples "$TA")"
   echo ">> [$c] target samples: $(wc -l < "$SAMP_LOC") held-out AoU ids"
-
-  # --- projection script (runs locally over the mount) ---
-  local PROJ; PROJ="$(resolve_project_script)"
-  [ -n "$PROJ" ] || { echo "ERROR: project_to_panel_rep.py not found (set PROJECT_LOCAL=/path/to/project_to_panel_rep.py)"; exit 1; }
-  echo ">> [$c] projection script: ${PROJ}"
-
-  # --- panel sites TSV = the cleaned leaveout refsrc actually in the bref3 ---
-  local RL="${LOCAL}/refsrc_noinfo.${c}.vcf.gz" REFSRC="${WORK}/ref/refsrc_noinfo.${c}.vcf.gz"
-  [ -s "$RL" ] || retry gsutil cp "${REFSRC}" "${RL}"
-  local PSITES="${LOCAL}/panel_sites.${c}.tsv.gz"
-  if [ ! -s "$PSITES" ]; then
-    echo ">> [$c] building panel sites TSV from leaveout refsrc"
-    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${RL}" | bgzip -c > "${PSITES}.tmp" && mv "${PSITES}.tmp" "${PSITES}"
-  fi
 
   # --- discover ACAF shards over the gcsfuse mount ---
   [ -d "${AOU_VCF_MOUNT}" ] || { echo "ERROR: ACAF mount not found: ${AOU_VCF_MOUNT} (set AOU_VCF_MOUNT to the acaf_threshold vcf/ dir)"; exit 1; }
@@ -332,9 +322,8 @@ build_target_holdout() {                   # $1=contig -> 198 ACAF SNV target, P
   # bcftools norm -m -any decomposes multiallelic ACAF sites into biallelic records and recodes GTs
   # (a het-of-two-alts 1/2 -> 1/0 in one record, 0/1 in the other; biallelic-valid). We deliberately do
   # NOT pre-filter -v snps here: padded SNVs from a split (e.g. AT>AG) stay len>1 and would be dropped by
-  # -v snps, but the projection's minimal-rep reduces them to a SNV and matches. The projection keeps only
-  # SNV-minrep matches, so indels/MNVs fall away there. (pipefail: a mid-stream GCS read error fails the
-  # whole pipe and the until-loop retries.)
+  # -v snps, but the projection's minimal-rep reduces them to a SNV and matches. (pipefail: a mid-stream
+  # GCS read error fails the whole pipe and the until-loop retries.)
   local PARTS="${LOCAL}/target_parts_${c}"; mkdir -p "$PARTS"
   local running=0 part
   for i in "${sel[@]}"; do
@@ -356,18 +345,41 @@ build_target_holdout() {                   # $1=contig -> 198 ACAF SNV target, P
   done
   wait
 
-  # --- collect parts in order, concat to the raw ACAF SNV target ---
+  # --- collect parts in order, concat to the raw ACAF target ---
   local PARTLIST=()
   for i in "${sel[@]}"; do
     part="${PARTS}/part_$(printf '%010d' "$i").vcf.gz"
     [ -s "$part" ] || { echo "ERROR: missing part for shard index $i ($part); rerun to resume"; exit 1; }
     PARTLIST+=("$part")
   done
-  local ACAF="${LOCAL}/${TARGET_BASE}_${c}.acaf.snps.vcf.gz"
-  bcftools concat --threads "${MERGE_THREADS}" -Oz -o "$ACAF" "${PARTLIST[@]}"
+  bcftools concat --threads "${MERGE_THREADS}" -Oz -o "${ACAF}.tmp" "${PARTLIST[@]}" && mv "${ACAF}.tmp" "$ACAF"
   local NS; NS="$(bcftools query -l "$ACAF" | wc -l)"
   [ "$NS" -gt 0 ] || { echo "ERROR: 0 of the requested ids found in ACAF (id namespace mismatch between panel/truth and ACAF? provide AOU_SAMPLES with ACAF-matching ids)"; exit 1; }
   echo ">> [$c] ACAF SNVs (pre-projection): $(bcftools index -n "$ACAF" 2>/dev/null || echo '?') records x ${NS} samples"
+}
+
+project_target() {                         # $1=contig -> PROJECT ACAF onto panel rep -> final target (needs refsrc + ACAF concat)
+  local c="$1"
+  local TGT="${TARGET_DIR}${TARGET_BASE}_${c}.snps.vcf.gz"
+  if [ "${IDEMPOTENT}" = "true" ] && gs_exists "${TGT}" && gs_exists "${TGT}.tbi"; then
+    echo ">> [$c] target exists: ${TGT}"; return
+  fi
+  local ACAF="${LOCAL}/${TARGET_BASE}_${c}.acaf.snps.vcf.gz"
+  [ -s "$ACAF" ] || { echo "ERROR: [$c] ACAF concat missing: ${ACAF} (pull phase did not complete)"; exit 1; }
+
+  # --- projection script (runs locally) ---
+  local PROJ; PROJ="$(resolve_project_script)"
+  [ -n "$PROJ" ] || { echo "ERROR: project_to_panel_rep.py not found (set PROJECT_LOCAL=/path/to/project_to_panel_rep.py)"; exit 1; }
+  echo ">> [$c] projection script: ${PROJ}"
+
+  # --- panel sites TSV = the cleaned leaveout refsrc actually in the bref3 (produced by prep_panel) ---
+  local RL="${LOCAL}/refsrc_noinfo.${c}.vcf.gz" REFSRC="${WORK}/ref/refsrc_noinfo.${c}.vcf.gz"
+  [ -s "$RL" ] || retry gsutil cp "${REFSRC}" "${RL}"
+  local PSITES="${LOCAL}/panel_sites.${c}.tsv.gz"
+  if [ ! -s "$PSITES" ]; then
+    echo ">> [$c] building panel sites TSV from leaveout refsrc"
+    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${RL}" | bgzip -c > "${PSITES}.tmp" && mv "${PSITES}.tmp" "${PSITES}"
+  fi
 
   # --- PROJECT onto panel bubble-allele representation, unphase, sort ---
   local TL="${LOCAL}/${TARGET_BASE}_${c}.snps.vcf.gz"
@@ -384,10 +396,20 @@ build_target_holdout() {                   # $1=contig -> 198 ACAF SNV target, P
 for c in "${CONTIGS[@]}"; do
   echo "===================== ${c} ====================="
   resolve_panel "$c"
-  prep_panel "$c"
-  build_bref3 "$c"
-  stage_map "$c"
-  build_target_holdout "$c"
+  if [ "${TARGET_CONCURRENT}" = "true" ]; then
+    # ACAF shard pulls (network-bound) overlap the CPU-bound panel prep + bref3 build (the slow
+    # part that was blocking the copies). The pull needs only TRUTH_AOU + the mount, not the panel.
+    echo ">> [$c] launching ACAF target pull in background; building reference concurrently"
+    pull_acaf_target "$c" & _acaf_pid=$!
+    prep_panel "$c"
+    build_bref3 "$c"
+    stage_map "$c"
+    if ! wait "${_acaf_pid}"; then echo "ERROR: [$c] ACAF target pull failed (see log above)"; exit 1; fi
+    project_target "$c"
+  else
+    prep_panel "$c"; build_bref3 "$c"; stage_map "$c"
+    pull_acaf_target "$c"; project_target "$c"
+  fi
 done
 
 # ---- stage the pop-glimpse2 Rust engine + resolve per-contig pop inputs -----
