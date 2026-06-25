@@ -149,10 +149,11 @@ TARGET_PULL_MODE="${TARGET_PULL_MODE:-copy}"
 # downloaded-but-unread -> peak local disk ~= (PREFETCH + DL_PARALLEL) * shard_size.
 DL_PARALLEL="${DL_PARALLEL:-${PARALLEL}}"
 PREFETCH="${PREFETCH:-$(( PARALLEL + 2 ))}"
-# keep only ACAF sites whose FILTER passes this list (bcftools -f). Default PASS = drop any
-# non-PASS site (incl. FILTER="."). Set TARGET_FILTER="PASS,." to also keep unfiltered sites,
-# or TARGET_FILTER= (empty) to disable site filtering.
-TARGET_FILTER="${TARGET_FILTER-PASS}"
+# keep only ACAF sites whose FILTER passes this list (bcftools -f). Default "PASS,." keeps
+# PASS plus unfiltered (FILTER=".") sites (here "." implies PASS); other filters (LowQual,
+# ExcessHet, ...) are dropped. Set TARGET_FILTER="PASS" to require an explicit PASS, or
+# TARGET_FILTER= (empty) to disable site filtering.
+TARGET_FILTER="${TARGET_FILTER-PASS,.}"
 IDEMPOTENT="${IDEMPOTENT:-true}"
 
 # ============================ preflight ======================================
