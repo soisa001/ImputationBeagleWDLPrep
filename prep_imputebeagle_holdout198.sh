@@ -68,8 +68,10 @@ TRUTH_AOU="${TRUTH_AOU:-gs://cloned-rw-migration-aou-rw-f178dfde-wb-sharp-papaya
 # = full panel. PGEN preserves REF/ALT/indels/multiallelics (faithful for min-rep matching) and
 # lets plink2 subset the 198 from the packed genotypes without the 245k-column text parse the
 # scattered VCF shards required. Per the AoU layout the files are
-# <AOU_PGEN_GS>/<contig>.pgen + .pvar[.zst] + .psam (one <=~100GB file per chromosome).
+# <AOU_PGEN_GS>/acaf_threshold.<contig>.pgen + .pvar[.zst] + .psam (one <=~100GB file per chrom).
 AOU_PGEN_GS="${AOU_PGEN_GS:-gs://vwb-aou-datasets-controlled/v8/wgs/short_read/snpindel/acaf_threshold/pgen}"
+# gs:// prefix of the per-contig PGEN (no extension); .pgen/.pvar[.zst]/.psam are appended.
+PGEN_PREFIX_TMPL="${PGEN_PREFIX_TMPL:-${AOU_PGEN_GS}/acaf_threshold.{contig}}"
 # 198 held-out AoU ids: local/gs file (one id per line). If unset, derived from TRUTH_AOU's sample list.
 AOU_SAMPLES="${AOU_SAMPLES:-}"
 # representation projection script (runs locally); auto-detected at ~ or ./ if unset.
@@ -303,13 +305,14 @@ pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic tar
   # --- download the per-chromosome ACAF PGEN triple (pgen + pvar[.zst] + psam) ---
   local PDIR="${LOCAL}/pgen"; mkdir -p "$PDIR"
   local PFX="${PDIR}/${c}" VZS=""
-  echo ">> [$c] downloading ACAF PGEN: ${AOU_PGEN_GS}/${c}.{pgen,pvar[.zst],psam}"
-  dl_to "${AOU_PGEN_GS}/${c}.pgen" "${PFX}.pgen"
-  dl_to "${AOU_PGEN_GS}/${c}.psam" "${PFX}.psam"
-  if [ -s "${PFX}.pvar.zst" ] || acaf_obj_exists "${AOU_PGEN_GS}/${c}.pvar.zst"; then
-    dl_to "${AOU_PGEN_GS}/${c}.pvar.zst" "${PFX}.pvar.zst"; VZS="vzs"
+  local gpfx="${PGEN_PREFIX_TMPL//\{contig\}/$c}"           # gs:// prefix for this contig
+  echo ">> [$c] downloading ACAF PGEN: ${gpfx}.{pgen,pvar[.zst],psam}"
+  dl_to "${gpfx}.pgen" "${PFX}.pgen"
+  dl_to "${gpfx}.psam" "${PFX}.psam"
+  if [ -s "${PFX}.pvar.zst" ] || acaf_obj_exists "${gpfx}.pvar.zst"; then
+    dl_to "${gpfx}.pvar.zst" "${PFX}.pvar.zst"; VZS="vzs"
   else
-    dl_to "${AOU_PGEN_GS}/${c}.pvar" "${PFX}.pvar"
+    dl_to "${gpfx}.pvar" "${PFX}.pvar"
   fi
 
   # --- plink2: keep the 198, export to VCF (REF/ALT + multiallelics preserved; IID sample names) ---
@@ -323,6 +326,19 @@ pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic tar
          --out "${EXP}"
   [ -s "${EXP}.vcf.gz" ] || { echo "ERROR: [$c] plink2 export produced no VCF (${EXP}.vcf.gz)"; exit 1; }
 
+  # --- sanity: how many of the 198 plink2 actually kept (catches IID-namespace mismatch) ---
+  local n_exp n_req; n_exp="$(bcftools query -l "${EXP}.vcf.gz" | wc -l)"; n_req="$(wc -l < "$SAMP_LOC")"
+  echo ">> [$c] plink2 export: ${n_exp}/${n_req} requested samples present"
+  [ "$n_exp" -gt 0 ] || { echo "ERROR: [$c] plink2 kept 0 of the ${n_req} ids -- IID namespace mismatch between the ACAF .psam and TRUTH_AOU/AOU_SAMPLES? (check the .psam IID column)"; exit 1; }
+  [ "$n_exp" -ge "$n_req" ] || echo ">> [$c] WARN: $((n_req - n_exp)) requested id(s) absent from the ACAF .psam"
+
+  # --- sanity: FILTER distribution on the export; warn if TARGET_FILTER would be a no-op ---
+  local FILTVALS; FILTVALS="$(bcftools view -H "${EXP}.vcf.gz" 2>/dev/null | head -n 200000 | cut -f7 | sort | uniq -c | sort -rn)"
+  echo ">> [$c] export FILTER distribution (first 200k records):"; printf '%s\n' "$FILTVALS" | sed 's/^/      /'
+  if [ -n "${TARGET_FILTER}" ] && [ -z "$(printf '%s\n' "$FILTVALS" | awk 'NF && $2!="."{print}')" ]; then
+    echo ">> [$c] WARN: export FILTER is all '.' -> TARGET_FILTER='${TARGET_FILTER}' is a no-op (the .pvar carried no FILTER column). Use plink2 --var-filter or filter upstream if you need site-level filtering."
+  fi
+
   # --- keep PASS sites, split multiallelics -> biallelic (GT recode) = the raw ACAF target ---
   # norm -m -any decomposes multiallelic sites and recodes GTs (1/2 -> 1/0 & 0/1; biallelic-valid).
   # No -v snps prefilter: split padded SNVs stay len>1 but the projection's minimal-rep matches them.
@@ -332,9 +348,16 @@ pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic tar
   mv "${ACAF}.tmp" "$ACAF"
   rm -f "${EXP}.vcf.gz" "${EXP}.log" "${PFX}.pgen" "${PFX}.pvar" "${PFX}.pvar.zst" "${PFX}.psam"   # free disk (~100GB pgen)
 
-  local NS; NS="$(bcftools query -l "$ACAF" | wc -l)"
-  [ "$NS" -gt 0 ] || { echo "ERROR: 0 of the requested ids found in ACAF PGEN (id namespace mismatch between panel/truth and ACAF? provide AOU_SAMPLES with ACAF-matching ids)"; exit 1; }
-  echo ">> [$c] ACAF SNVs (pre-projection): $(bcftools index -n "$ACAF" 2>/dev/null || echo '?') records x ${NS} samples"
+  # --- sanity: index + record count, sample count, and CHROM matches the requested contig ---
+  bcftools index -f "$ACAF" 2>/dev/null || true
+  local NS NREC AC1
+  NS="$(bcftools query -l "$ACAF" | wc -l)"
+  NREC="$(bcftools index -n "$ACAF" 2>/dev/null || true)"; [ -n "$NREC" ] || NREC="$(bcftools view -H "$ACAF" 2>/dev/null | wc -l)"
+  AC1="$(bcftools view -H "$ACAF" 2>/dev/null | head -1 | cut -f1)"
+  [ "$NS" -gt 0 ] || { echo "ERROR: [$c] 0 samples in the ACAF target"; exit 1; }
+  [ "${NREC:-0}" -gt 0 ] || { echo "ERROR: [$c] ACAF target has 0 records after FILTER='${TARGET_FILTER}' + norm (over-filtering, or wrong contig file?)"; exit 1; }
+  [ "$AC1" = "$c" ] || echo ">> [$c] WARN: ACAF target CHROM is '${AC1}', expected '${c}' (check plink2 --output-chr vs the panel's contig naming -- the projection matches on CHROM)"
+  echo ">> [$c] ACAF target (pre-projection): ${NREC} biallelic records x ${NS} samples (contig ${AC1})"
 }
 
 project_target() {                         # $1=contig -> PROJECT ACAF onto panel rep -> final target (needs refsrc + ACAF concat)
