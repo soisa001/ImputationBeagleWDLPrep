@@ -131,6 +131,11 @@ pre-build (e.g. to build once before launching); the prep does the same automati
   cached in `PROJECT_BUILD_DIR`); it is a pure-std port that is **byte-identical** to
   `project_to_panel_rep.py` (verify with `bash test_projection_equivalence.sh`) but ~10-50x faster.
   The output is still piped through `bcftools sort` (temp on the data disk via `-T`).
+- The bubble-pop task (`PopAndMarginalizeCollisions`) no longer runs `bcftools annotate` (memory
+  heavy). `pop-glimpse2` now reads the bubble ID straight from the sites-only panel (its 2nd
+  positional arg) via a streaming, memory-bounded (CHROM,POS,REF,ALT) join, ported from upstream
+  `pop-glimpse2-joint-opt.rs` (minus mimalloc, to keep the static-musl build pure-Rust). Verified to
+  produce identical popped output to the old annotate-based path.
 - The eval WDLs fetch tools at runtime (concordance binary via wget, cyvcf2 via conda); if the
   VPC-SC perimeter blocks that, switch them to a prebuilt/offline approach.
 - Sample-id namespace must match between panel/truth and ACAF; the prep errors if 0 of the 198 are

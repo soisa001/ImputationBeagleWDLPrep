@@ -1093,7 +1093,7 @@ task PopAndMarginalizeCollisions {
   input {
     File posteriors_vcf                          # final imputed VCF (GT:DS:GP)
     File posteriors_vcf_index
-    File panel_bubble_split_sites_only_vcf
+    File panel_bubble_split_sites_only_vcf       # bubble ID source (pop-glimpse2 reads it directly; no bcftools annotate)
     File panel_bubble_split_sites_only_vcf_idx
     File panel_id_split_vcf_gz
     File panel_id_split_vcf_gz_tbi
@@ -1129,15 +1129,16 @@ task PopAndMarginalizeCollisions {
         exit 1
     fi
 
-    # Restore bubble IDs from the sites-only panel, pop collisions to constituent variants via
-    # pop-glimpse2 (reads the annotated bubble VCF on stdin, takes the id-split VCF as its single
-    # positional arg, writes the popped VCF to stdout; consumes FORMAT/GP -> GT:DS:GP), then
-    # position-sort. Emit bgzipped VCF + tabix index to match the Beagle outputs.
-    bcftools annotate ~{if defined(region) then "-r " + region + " --regions-overlap 0" else ""} \
-        -a ~{panel_bubble_split_sites_only_vcf} ~{posteriors_vcf} \
-        -c CHROM,POS,REF,ALT,ID:=INFO/ID,INFO/ID:=INFO/ID \
-      | "$POP_BIN" ~{panel_id_split_vcf_gz} \
-      | bcftools sort -Oz -o ~{basename}.vcf.gz
+    # Pop bubble alleles to constituent variants + marginalize collisions via pop-glimpse2. The bubble
+    # ID is read directly from the sites-only panel (pop-glimpse2's 2nd positional arg), which replaces
+    # the memory-heavy `bcftools annotate`. pop-glimpse2 consumes FORMAT/GP -> GT:DS:GP and matches the
+    # sites by (CHROM,POS,REF,ALT); shard the sites to the region so the streaming join stays aligned.
+    # Then position-sort. Emit bgzipped VCF + tabix index to match the Beagle outputs.
+    bcftools view ~{if defined(region) then "-r " + region + " --regions-overlap 0" else ""} \
+        ~{panel_bubble_split_sites_only_vcf} -Oz -o sites.shard.vcf.gz
+    bcftools view ~{if defined(region) then "-r " + region + " --regions-overlap 0" else ""} ~{posteriors_vcf} \
+      | "$POP_BIN" ~{panel_id_split_vcf_gz} sites.shard.vcf.gz \
+      | bcftools sort -m 2G -Oz -o ~{basename}.vcf.gz
     bcftools index -t ~{basename}.vcf.gz
   >>>
   output {
