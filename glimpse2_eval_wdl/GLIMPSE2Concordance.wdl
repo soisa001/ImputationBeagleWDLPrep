@@ -10,6 +10,7 @@ workflow GLIMPSE2Concordance {
         File trh_bed_idx
         String region
         String output_prefix
+        File? concordance_binary   # pre-staged GLIMPSE2_concordance_static (perimeter blocks the github wget)
     }
 
     Array[String] trh_bins = ["outTRH", "inTRH"]
@@ -34,6 +35,7 @@ workflow GLIMPSE2Concordance {
                 trh_bin = trh_bin,
                 length_bin = length_bin,
                 region = region,
+                concordance_binary = concordance_binary,
                 output_prefix = output_prefix + "." + trh_bin + "." + length_bin
             }
         }
@@ -132,6 +134,7 @@ task FilterAndConcordance {
         String length_bin
         String region
         String output_prefix
+        File? concordance_binary
 
         RuntimeAttr? runtime_attr_override
     }
@@ -164,7 +167,12 @@ task FilterAndConcordance {
 
         echo "~{region} ~{panel_vcf} ~{panel_vcf} ~{output_prefix}.bcf" > ~{output_prefix}.concordance-input.txt
 
-        wget https://github.com/odelaneau/GLIMPSE/releases/download/v2.0.1/GLIMPSE2_concordance_static
+        # Use a pre-staged binary if provided (the VPC-SC perimeter blocks the github wget); else fetch.
+        if [ -n "~{concordance_binary}" ]; then
+            cp ~{concordance_binary} GLIMPSE2_concordance_static
+        else
+            wget https://github.com/odelaneau/GLIMPSE/releases/download/v2.0.1/GLIMPSE2_concordance_static
+        fi
         chmod +x GLIMPSE2_concordance_static
 
         ./GLIMPSE2_concordance_static \

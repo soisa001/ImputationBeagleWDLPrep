@@ -85,6 +85,14 @@ TRH_BED="${TRH_BED:-}"
 TRH_BED_IDX="${TRH_BED_IDX:-${TRH_BED}.tbi}"
 TRH_BED_URL="${TRH_BED_URL:-https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/genome-stratifications/v3.6/GRCh38@all/LowComplexity/GRCh38_AllTandemRepeatsandHomopolymers_slop5.bed.gz}"
 
+# ---- Step C: GLIMPSE2_concordance_static binary (the VPC-SC perimeter blocks the WDL's github wget) ----
+# Staged to the bucket and passed to the Concordance WDL. Resolution order: CONCORDANCE_BIN (gs://,
+# used as-is) -> CONCORDANCE_BIN_LOCAL / the vendored ./glimpse2_eval_wdl/GLIMPSE2_concordance_static
+# -> download CONCORDANCE_BIN_URL (only if this VM has github egress).
+CONCORDANCE_BIN="${CONCORDANCE_BIN:-}"               # gs:// to a prebuilt binary (skips staging)
+CONCORDANCE_BIN_LOCAL="${CONCORDANCE_BIN_LOCAL:-}"   # local path; auto-detected next to the eval WDLs if unset
+CONCORDANCE_BIN_URL="${CONCORDANCE_BIN_URL:-https://github.com/odelaneau/GLIMPSE/releases/download/v2.0.1/GLIMPSE2_concordance_static}"
+
 # ---- Step D open deps ----
 ENABLE_SUMMARIZE="${ENABLE_SUMMARIZE:-true}"
 POP_TSV="${POP_TSV:-}"                             # optional igsr-style TSV ("Sample name","Population code"). If unset, a one-population TSV (code "ALL") is auto-generated.
@@ -164,6 +172,33 @@ ensure_trh_bed() {
   TRH_BED="${gcs}"; TRH_BED_IDX="${gcs}.tbi"
 }
 
+# Stage GLIMPSE2_concordance_static to the bucket and set CONCORDANCE_BIN to the gs:// path so the
+# Concordance WDL uses it instead of wget-ing github (blocked by the perimeter).
+ensure_concordance_bin() {
+  if [[ "${CONCORDANCE_BIN}" == gs://* ]]; then
+    gs_exists "${CONCORDANCE_BIN}" || { echo "ERROR: CONCORDANCE_BIN not found: ${CONCORDANCE_BIN}"; exit 1; }
+    echo ">> concordance binary (user gs://): ${CONCORDANCE_BIN}"; return
+  fi
+  local gcs="${EVAL_WORK}/bin/GLIMPSE2_concordance_static"
+  if gs_exists "${gcs}"; then echo ">> concordance binary already staged: ${gcs}"; CONCORDANCE_BIN="${gcs}"; return; fi
+  # resolve a local copy: explicit override, then vendored next to the eval WDLs, then download
+  local L="${CONCORDANCE_BIN_LOCAL}" d
+  if [ -z "$L" ]; then
+    for d in "${WDL_EVAL_SRC_LOCAL:-}" "./glimpse2_eval_wdl" "${HOME}/glimpse2_eval_wdl" "."; do
+      [ -n "$d" ] && [ -s "${d%/}/GLIMPSE2_concordance_static" ] && { L="${d%/}/GLIMPSE2_concordance_static"; break; }
+    done
+  fi
+  if [ -z "$L" ] || [ ! -s "$L" ]; then
+    echo ">> downloading concordance binary from ${CONCORDANCE_BIN_URL}"
+    mkdir -p "${LOCAL}/bin"; L="${LOCAL}/bin/GLIMPSE2_concordance_static"
+    curl -fL --retry 6 --retry-all-errors --retry-delay 10 -o "$L" "${CONCORDANCE_BIN_URL}" \
+      || { echo "ERROR: cannot fetch the concordance binary (perimeter blocks github?). Supply it: CONCORDANCE_BIN=gs://<bucket>/GLIMPSE2_concordance_static (upload from a github-reachable machine), or vendor ./glimpse2_eval_wdl/GLIMPSE2_concordance_static."; exit 1; }
+  fi
+  echo ">> staging concordance binary: ${L} -> ${gcs}"
+  gsutil cp "$L" "${gcs}"
+  CONCORDANCE_BIN="${gcs}"
+}
+
 # ============================ resolve imputed output =========================
 if [ -z "${IMPUTED_VCF}" ]; then
   ROOT="${BUCKET}/${HOLDOUT_OUTPUT_PATH}"
@@ -184,12 +219,12 @@ echo ">> panel   : ${PANEL_FULL}"
 # ============================ register eval WDLs =============================
 register_eval_wf() {                       # $1=workflow name, $2=wdl filename
   local name="$1" file="$2"
-  gs_exists "${WDL_EVAL_GCS}${file}" || {
+  if [ "${FORCE_WF_REGISTER}" = "true" ] || ! gs_exists "${WDL_EVAL_GCS}${file}"; then   # re-upload on FORCE so WDL edits propagate
     [ -n "${WDL_EVAL_SRC_LOCAL:-}" ] && [ -f "${WDL_EVAL_SRC_LOCAL%/}/${file}" ] \
       || { echo "ERROR: ${file} not in this workspace bucket and no local copy found."; echo "       set WDL_EVAL_SRC_LOCAL=<dir with ${WF_CONC}.wdl + ${WF_SUMM}.wdl>."; exit 1; }
     echo ">> uploading ${WDL_EVAL_SRC_LOCAL%/}/${file} -> ${WDL_EVAL_GCS}"
     gsutil cp "${WDL_EVAL_SRC_LOCAL%/}/${file}" "${WDL_EVAL_GCS}"
-  }
+  fi
   if [ "${FORCE_WF_REGISTER}" = "true" ] && wb workflow list 2>/dev/null | grep -qw "${name}"; then
     echo ">> FORCE_WF_REGISTER: deleting stale ${name}"; wb workflow delete --workflow="${name}" --quiet 2>/dev/null || true
   fi
@@ -248,9 +283,11 @@ PY
 # ============================ Step C: Concordance ============================
 if [ "${ENABLE_CONCORDANCE}" = "true" ]; then
   ensure_trh_bed
+  ensure_concordance_bin
   C_IN="panel_vcf=${PANEL_FULL},panel_vcf_idx=${PANEL_FULL_IDX}"
   C_IN="${C_IN},imputed_vcf=${IMPUTED_VCF},imputed_vcf_idx=${IMPUTED_IDX}"
   C_IN="${C_IN},trh_bed=${TRH_BED},trh_bed_idx=${TRH_BED_IDX}"
+  C_IN="${C_IN},concordance_binary=${CONCORDANCE_BIN}"
   C_IN="${C_IN},region=${REGION},output_prefix=${OUT_PREFIX}"
   run_wf "${WF_CONC}" "glimpse2-concordance-holdout198${EVAL_PATHTAG}" "${C_IN}"
 fi

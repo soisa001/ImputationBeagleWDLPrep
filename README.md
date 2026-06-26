@@ -138,7 +138,11 @@ pre-build (e.g. to build once before launching); the prep does the same automati
   positional arg) via a streaming, memory-bounded (CHROM,POS,REF,ALT) join, ported from upstream
   `pop-glimpse2-joint-opt.rs` (minus mimalloc, to keep the static-musl build pure-Rust). Verified to
   produce identical popped output to the old annotate-based path.
-- The eval WDLs fetch tools at runtime (concordance binary via wget, cyvcf2 via conda); if the
-  VPC-SC perimeter blocks that, switch them to a prebuilt/offline approach.
+- The perimeter blocks the Concordance WDL's github `wget` of `GLIMPSE2_concordance_static`, so the
+  binary is vendored (`glimpse2_eval_wdl/GLIMPSE2_concordance_static`); the eval prep stages it to the
+  bucket and passes it as the `concordance_binary` input. After updating the eval WDL, re-run the eval
+  with `FORCE_WF_REGISTER=true` once so the new WDL is re-uploaded + re-registered.
+- Step D (Summarize) still conda-installs cyvcf2 at runtime; if the perimeter blocks that too, it will
+  need the same prebuilt/offline treatment.
 - Sample-id namespace must match between panel/truth and ACAF; the prep errors if 0 of the 198 are
   found and reports the count otherwise.
