@@ -110,8 +110,13 @@ ERROR_COUNT_OVERRIDE="${ERROR_COUNT_OVERRIDE:-0}"
 # (<OUT_BASE>.imputed.vcf.gz, bubble.split = what the eval scores first) AND the
 # popped imputed_popped_vcf (<OUT_BASE>.imputed.popped.vcf.gz, for the later run).
 ENABLE_POP="${ENABLE_POP:-true}"
+# Sites-only panel = the bubble-ID source the pop step (PopAndMarginalizeCollisions) joins to the
+# imputed posteriors. Use the LEAVEOUT sites-only to stay consistent with the leaveout bref3 the
+# posteriors come from (the popped variant set then matches the imputed marker set; the bubble->ID
+# mapping itself is leaveout-invariant). Set SITES_ONLY_TMPL to the full-panel
+# panel_bubble_split_sites_only_vcf/...sites.bcf if you want the full (superset) sites instead.
 SITES_ONLY_TMPL="${SITES_ONLY_TMPL:-}"
-[ -n "${SITES_ONLY_TMPL}" ] || SITES_ONLY_TMPL='gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_bubble_split_sites_only_vcf/aou_lr_phase2_v1.{contig}.bubble.split.sites.bcf'
+[ -n "${SITES_ONLY_TMPL}" ] || SITES_ONLY_TMPL='gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_bubble_split_sites_only_leaveout_vcf/aou_lr_phase2_v1.{contig}.bubble.split.sites.leaveout.bcf'
 ID_SPLIT_TMPL="${ID_SPLIT_TMPL:-}"
 [ -n "${ID_SPLIT_TMPL}" ] || ID_SPLIT_TMPL='gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_id_split_vcf_gz/aou_lr_phase2_v1.{contig}.id.split.vcf.gz'
 # pop-glimpse2 Rust engine: stage the source (.rs) + Cargo.toml (built in-task with cargo),
