@@ -221,7 +221,7 @@ prep_panel() {                             # $1=contig -> refsrc + unique_varian
     | awk -F'\t' 'BEGIN{OFS="\t"} /^#/{print;next} {n=split($5,a,","); bad=0; for(i=1;i<=n;i++) if(a[i]==$4){bad=1;break} if(bad){d++} else print} END{if(d) print "  [refsrc] dropped "d" REF==ALT record(s)" > "/dev/stderr"}' \
     | bcftools view -Oz -o "${RL}" --threads "${PANEL_THREADS}" -
   bcftools index -t --threads "${THREADS}" "${RL}"
-  bcftools query -f '%CHROM:%POS:%REF:%ALT\n' "${RL}" | LC_ALL=C sort -u --parallel="${THREADS}" -S 4G | sed '/^$/d' > "${UL}"
+  bcftools query --threads "${PANEL_THREADS}" -f '%CHROM:%POS:%REF:%ALT\n' "${RL}" | LC_ALL=C sort -u --parallel="${THREADS}" -S 4G | sed '/^$/d' > "${UL}"
   gsutil cp "${RL}" "${REFSRC}"; gsutil cp "${RL}.tbi" "${REFSRC}.tbi"; gsutil cp "${UL}" "${UNIQV}"
 }
 
@@ -408,14 +408,21 @@ project_target() {                         # $1=contig -> PROJECT ACAF onto pane
     PROJECTOR=( python3 "$PROJ" )
   fi
 
-  # --- panel sites TSV = the cleaned leaveout refsrc actually in the bref3 (produced by prep_panel) ---
-  # Plain (uncompressed) TSV: both the Rust (pure-std, no gzip) and Python projectors read it directly.
-  local RL="${LOCAL}/refsrc_noinfo.${c}.vcf.gz" REFSRC="${WORK}/ref/refsrc_noinfo.${c}.vcf.gz"
-  [ -s "$RL" ] || retry gsutil cp "${REFSRC}" "${RL}"
+  # --- panel sites TSV from the sites-only unique_variants list prep_panel already built ---
+  # unique_variants = CHROM:POS:REF:ALT of every bref3 record (genotype-free). Deriving the TSV from
+  # it (colon->tab) avoids a second full decode of the genotype-heavy refsrc -- which is identical to
+  # what `bcftools query %CHROM\t%POS\t%REF\t%ALT` over the refsrc produced, just ~1000x faster (no
+  # genotypes to decompress, no refsrc download here). Plain TSV: both the Rust (pure-std, no gzip)
+  # and Python projectors read it directly.
+  local UL="${LOCAL}/${c}.unique_variants" UNIQV="${REF_PREFIX}.${c}.unique_variants"
+  [ -s "$UL" ] || retry gsutil cp "${UNIQV}" "${UL}"
   local PSITES="${LOCAL}/panel_sites.${c}.tsv"
   if [ ! -s "$PSITES" ]; then
-    echo ">> [$c] building panel sites TSV from leaveout refsrc"
-    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${RL}" > "${PSITES}.tmp" && mv "${PSITES}.tmp" "${PSITES}"
+    echo ">> [$c] building panel sites TSV from unique_variants (sites-only; no genotype decode)"
+    # first 3 colons -> tabs (REF has no ':'; a symbolic ALT keeps its internal ':'); position-sorted
+    # to match the projection's prefer-exact tiebreak order over the (position-sorted) refsrc.
+    sed 's/:/\t/;s/:/\t/;s/:/\t/' "${UL}" \
+      | LC_ALL=C sort -k1,1 -k2,2n -S 1G --parallel="${THREADS}" > "${PSITES}.tmp" && mv "${PSITES}.tmp" "${PSITES}"
   fi
 
   # --- PROJECT onto panel bubble-allele representation, unphase, sort ---
