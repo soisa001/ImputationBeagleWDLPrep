@@ -91,7 +91,9 @@ wb workflow job list | head
 nohup bash prep_eval_holdout198.sh > holdout198_eval.log 2>&1 &
 tail -f holdout198_eval.log
 
-# 3b) later: popped eval (truth side should become the id-split panel; current wiring is for un-popped)
+# 3b) popped eval: scores the popped (constituent) output vs the popped FULL panel
+#     (panel_popped_vcf). Staging + outputs are namespaced (.popped / -popped) so it
+#     does not clobber the un-popped eval.
 # POPPED=true bash prep_eval_holdout198.sh
 ```
 

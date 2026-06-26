@@ -59,10 +59,23 @@ POPPED="${POPPED:-false}"
 HOLDOUT_OUTPUT_PATH="${HOLDOUT_OUTPUT_PATH:-imputebeagle-${RUN_ID}-run}"
 OUT_BASE="${OUT_BASE:-aou_holdout198_${REGION}}"  # the imputation output_basename -> <OUT_BASE>.imputed[.popped].vcf.gz
 
-# ---- truth/freq panel (FULL panel) ----
+# POPPED=true scores the popped (constituent/atomic) output against the POPPED full panel; the default
+# scores the un-popped (bubble.split) output against the bubble.split panel. EVAL_TAG namespaces every
+# eval staging artifact + output path so the two evals never overwrite each other.
+EVAL_TAG=""; EVAL_PATHTAG=""
+if [ "${POPPED}" = "true" ]; then EVAL_TAG=".popped"; EVAL_PATHTAG="-popped"; fi
+OUT_PREFIX="${OUT_PREFIX}${EVAL_TAG}"
+
+# ---- truth/freq panel (FULL panel; bubble.split for un-popped, popped for POPPED) ----
 FULL_SRC_TMPL="${FULL_SRC_TMPL-}"
 [ -n "${FULL_SRC_TMPL}" ] || FULL_SRC_TMPL='gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_bubble_split_vcf/aou_lr_phase2_v1.{contig}.bubble.split.bcf'
-PANEL_FULL="${PANEL_FULL:-${FULL_SRC_TMPL//\{contig\}/${REGION}}}"
+FULL_POPPED_SRC_TMPL="${FULL_POPPED_SRC_TMPL-}"
+[ -n "${FULL_POPPED_SRC_TMPL}" ] || FULL_POPPED_SRC_TMPL='gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_popped_vcf/aou_lr_phase2_v1.{contig}.popped.bcf'
+if [ "${POPPED}" = "true" ]; then
+  PANEL_FULL="${PANEL_FULL:-${FULL_POPPED_SRC_TMPL//\{contig\}/${REGION}}}"
+else
+  PANEL_FULL="${PANEL_FULL:-${FULL_SRC_TMPL//\{contig\}/${REGION}}}"
+fi
 PANEL_FULL_IDX="${PANEL_FULL_IDX:-${PANEL_FULL}.csi}"
 
 # ---- Step C: tandem-repeat / homopolymer stratification BED (OPTIONAL) ----
@@ -191,7 +204,8 @@ register_eval_wf() {                       # $1=workflow name, $2=wdl filename
 [ "${ENABLE_SUMMARIZE}"   = "true" ] && register_eval_wf "${WF_SUMM}" "${WF_SUMM}.wdl"
 
 run_wf() {                                 # $1=workflow $2=output_path $3=inputs(csv key=val)
-  local name="$1" opath="$2" inputs="$3" log="${LOCAL}/wb_eval_${name}.log"
+  local name="$1" opath="$2" inputs="$3"
+  local log="${LOCAL}/wb_eval_${name}.log"     # separate decl: a single `local` expands all RHS (incl ${name}) before assigning, tripping set -u
   echo ">> launching ${name}: output-path=${opath}"
   wb workflow job run \
     --workflow="${name}" \
@@ -211,7 +225,7 @@ if [ "${ENABLE_CONCORDANCE}" = "true" ]; then
   C_IN="${C_IN},imputed_vcf=${IMPUTED_VCF},imputed_vcf_idx=${IMPUTED_IDX}"
   C_IN="${C_IN},trh_bed=${TRH_BED},trh_bed_idx=${TRH_BED_IDX}"
   C_IN="${C_IN},region=${REGION},output_prefix=${OUT_PREFIX}"
-  run_wf "${WF_CONC}" "glimpse2-concordance-holdout198" "${C_IN}"
+  run_wf "${WF_CONC}" "glimpse2-concordance-holdout198${EVAL_PATHTAG}" "${C_IN}"
 fi
 
 # ============================ Step D: Summarize ==============================
@@ -225,25 +239,25 @@ if [ "${ENABLE_SUMMARIZE}" = "true" ]; then
   # the full-panel sites. Build a site-matched panel = full panel restricted to the imputed
   # sites (allele-aware), same position order, all panel samples retained.
   if [ -z "${PANEL_SUMM_VCF}" ]; then
-    PANEL_SUMM_VCF="${EVAL_WORK}/panel.${REGION}.site_matched.vcf.gz"
+    PANEL_SUMM_VCF="${EVAL_WORK}/panel.${REGION}${EVAL_TAG}.site_matched.vcf.gz"
     PANEL_SUMM_IDX="${PANEL_SUMM_VCF}.tbi"
     if gs_exists "${PANEL_SUMM_VCF}" && gs_exists "${PANEL_SUMM_IDX}"; then
       echo ">> site-matched panel exists: ${PANEL_SUMM_VCF}"
     else
       echo ">> building site-matched panel (full panel restricted to imputed sites)"
-      IMP_L="${LOCAL}/imputed.${REGION}.vcf.gz"
+      IMP_L="${LOCAL}/imputed.${REGION}${EVAL_TAG}.vcf.gz"
       [ -s "${IMP_L}" ]      || retry gsutil cp "${IMPUTED_VCF}" "${IMP_L}"
       [ -s "${IMP_L}.tbi" ]  || retry gsutil cp "${IMPUTED_IDX}" "${IMP_L}.tbi"
-      SITES="${LOCAL}/imp.sites.${REGION}.tsv.gz"
+      SITES="${LOCAL}/imp.sites.${REGION}${EVAL_TAG}.tsv.gz"
       bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${IMP_L}" | bgzip > "${SITES}"
       tabix -s1 -b2 -e2 "${SITES}"
       echo ">> imputed sites: $(zcat "${SITES}" | wc -l)"
-      FULL_L="${LOCAL}/full_panel.${REGION}.bcf"
+      FULL_L="${LOCAL}/full_panel.${REGION}${EVAL_TAG}.bcf"
       if [ ! -s "${FULL_L}" ]; then
         retry gsutil -u "${AOU_USER_PROJECT}" cp "${PANEL_FULL}" "${FULL_L}.part"
         mv "${FULL_L}.part" "${FULL_L}"
       fi
-      PS_L="${LOCAL}/panel.${REGION}.site_matched.vcf.gz"
+      PS_L="${LOCAL}/panel.${REGION}${EVAL_TAG}.site_matched.vcf.gz"
       bcftools view -T "${SITES}" -m2 -M2 "${FULL_L}" -Oz -o "${PS_L}"
       tabix -p vcf "${PS_L}"
       # guard: record counts should match (imputed subset of panel sites)
@@ -279,12 +293,12 @@ if [ "${ENABLE_SUMMARIZE}" = "true" ]; then
   S_IN="panel_vcf=${PANEL_SUMM_VCF},panel_vcf_idx=${PANEL_SUMM_IDX}"
   S_IN="${S_IN},imputed_vcf=${IMPUTED_VCF},imputed_vcf_idx=${IMPUTED_IDX}"
   S_IN="${S_IN},population_tsv=${POP_TSV},output_prefix=${OUT_PREFIX}"
-  run_wf "${WF_SUMM}" "glimpse2-summarize-holdout198" "${S_IN}"
+  run_wf "${WF_SUMM}" "glimpse2-summarize-holdout198${EVAL_PATHTAG}" "${S_IN}"
 fi
 
 echo "================= DONE ================="
 echo "eval WDLs registered from: ${WDL_EVAL_GCS}"
 echo "  ${WF_CONC} -> ${WDL_EVAL_REL}/${WF_CONC}.wdl"
 echo "  ${WF_SUMM} -> ${WDL_EVAL_REL}/${WF_SUMM}.wdl"
-[ "${ENABLE_CONCORDANCE}" = "true" ] && echo "Concordance out: ${BUCKET}/glimpse2-concordance-holdout198/${WF_CONC}/<uuid>/  (r2/nrd PNGs + rsquare/error tables)"
-[ "${ENABLE_SUMMARIZE}"   = "true" ] && echo "Summarize out:   ${BUCKET}/glimpse2-summarize-holdout198/${WF_SUMM}/<uuid>/  (pearson.tsv + AF/HWE/altlen PDFs)"
+[ "${ENABLE_CONCORDANCE}" = "true" ] && echo "Concordance out: ${BUCKET}/glimpse2-concordance-holdout198${EVAL_PATHTAG}/${WF_CONC}/<uuid>/  (r2/nrd PNGs + rsquare/error tables)"
+[ "${ENABLE_SUMMARIZE}"   = "true" ] && echo "Summarize out:   ${BUCKET}/glimpse2-summarize-holdout198${EVAL_PATHTAG}/${WF_SUMM}/<uuid>/  (pearson.tsv + AF/HWE/altlen PDFs)"
