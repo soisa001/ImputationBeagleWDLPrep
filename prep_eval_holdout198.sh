@@ -207,11 +207,38 @@ run_wf() {                                 # $1=workflow $2=output_path $3=input
   local name="$1" opath="$2" inputs="$3"
   local log="${LOCAL}/wb_eval_${name}.log"     # separate decl: a single `local` expands all RHS (incl ${name}) before assigning, tripping set -u
   echo ">> launching ${name}: output-path=${opath}"
+
+  # `wb workflow job run --inputs` expects JSON, not key=val CSV. Use the same proven mechanism as
+  # the imputation prep: build a fully-qualified inputs JSON -> 1-row batch CSV (bare columns) +
+  # column-mapping JSON, stage them, and run with --batch-input-csv-path / --column-mapping-uri.
+  local bdir="${LOCAL}/batch_eval"; mkdir -p "${bdir}"
+  local injson="${bdir}/${name}.inputs.json"
+  local incsv="${bdir}/${name}.inputs.csv"
+  local incols="${bdir}/${name}.columns.json"
+  WF="${name}" python3 - "${inputs}" "${injson}" "${incsv}" "${incols}" <<'PY'
+import json, csv, os, sys
+wf = os.environ["WF"]
+pairs = [kv.split("=", 1) for kv in sys.argv[1].split(",") if kv]
+d = {f"{wf}.{k}": v for k, v in pairs}                       # fully-qualified inputs (all string-valued)
+json.dump(d, open(sys.argv[2], "w"), indent=2)
+header = [k.split(".", 1)[1] for k in d]                     # bare column names
+with open(sys.argv[3], "w", newline="") as f:
+    w = csv.writer(f); w.writerow(header); w.writerow(list(d.values()))
+json.dump({k: k.split(".", 1)[1] for k in d}, open(sys.argv[4], "w"), indent=2)  # qualified -> bare
+PY
+
+  local bgcs="${EVAL_WORK}/batch/"
+  local csv_rel="${bgcs#${BUCKET}/}${name}.inputs.csv"
+  local cols_uri="${bgcs}${name}.columns.json"
+  gsutil cp "${injson}" "${incsv}" "${incols}" "${bgcs}"
+
   wb workflow job run \
     --workflow="${name}" \
     --output-bucket-id="${BUCKET_ID}" \
     --output-path="${opath}" \
-    --inputs="${inputs}" \
+    --batch-input-bucket-id="${BUCKET_ID}" \
+    --batch-input-csv-path="${csv_rel}" \
+    --column-mapping-uri="${cols_uri}" \
     --read-from-cache --write-to-cache 2>&1 | sanitize | tee "${log}" \
   || { echo ">> ${name} run failed; see ${log}"; return 1; }
   local jid; jid="$(grep -m1 'Job ID:' "${log}" 2>/dev/null | sed 's/.*Job ID:[[:space:]]*//' | tr -d '[:space:]' || true)"
