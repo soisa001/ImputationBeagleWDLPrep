@@ -74,8 +74,13 @@ AOU_PGEN_GS="${AOU_PGEN_GS:-gs://vwb-aou-datasets-controlled/v8/wgs/short_read/s
 PGEN_PREFIX_TMPL="${PGEN_PREFIX_TMPL:-${AOU_PGEN_GS}/acaf_threshold.{contig}}"
 # 198 held-out AoU ids: local/gs file (one id per line). If unset, derived from TRUTH_AOU's sample list.
 AOU_SAMPLES="${AOU_SAMPLES:-}"
-# representation projection script (runs locally); auto-detected at ~ or ./ if unset.
-PROJECT_LOCAL="${PROJECT_LOCAL:-}"
+# representation projection (runs locally). By default a Rust projector is built from
+# project_to_panel_rep.rs (rustc, pure-std) and used; it is byte-identical to the Python
+# project_to_panel_rep.py but ~10-50x faster. Falls back to the Python if no rustc/.rs.
+PROJECT_LOCAL="${PROJECT_LOCAL:-}"          # path to project_to_panel_rep.py (fallback); auto-detected if unset
+PROJECT_RS_LOCAL="${PROJECT_RS_LOCAL:-}"    # path to project_to_panel_rep.rs; auto-detected if unset
+PROJECT_BIN="${PROJECT_BIN:-}"             # prebuilt rust projector binary; if unset, built from the .rs
+PROJECT_BUILD_DIR="${PROJECT_BUILD_DIR:-${HOME}/project-build}"   # where the rust projector is built/cached
 
 REF_PREFIX="${WORK}/ref/aou_lr_phase2_v1_leaveout"   # bref3 = <prefix>.<contig>.bref3 (+ .unique_variants)
 MAPS_DIR="${WORK}/ref/genetic_maps/"             # trailing slash REQUIRED by the WDL
@@ -255,6 +260,21 @@ resolve_project_script() {                 # -> path to project_to_panel_rep.py 
   echo ""
 }
 
+resolve_project_bin() {                    # -> path to the rust projector (prebuilt or freshly built), or empty
+  if [ -n "${PROJECT_BIN}" ] && [ -x "${PROJECT_BIN}" ]; then echo "${PROJECT_BIN}"; return; fi
+  local cached="${PROJECT_BUILD_DIR}/project_to_panel_rep"
+  [ -x "$cached" ] && { echo "$cached"; return; }          # idempotent reuse
+  command -v rustc >/dev/null 2>&1 || { echo ""; return; }  # no rustc -> caller falls back to python
+  local src="" d
+  for d in "${PROJECT_RS_LOCAL}" "${HOME}/project_to_panel_rep.rs" "./project_to_panel_rep.rs" "${PWD}/project_to_panel_rep.rs"; do
+    [ -n "$d" ] && [ -s "$d" ] && { src="$d"; break; }
+  done
+  [ -n "$src" ] || { echo ""; return; }
+  mkdir -p "${PROJECT_BUILD_DIR}"
+  echo ">> building rust projector: rustc -O ${src}" >&2
+  if rustc -O "$src" -o "${cached}.tmp" >&2; then mv "${cached}.tmp" "$cached"; echo "$cached"; else echo ""; fi
+}
+
 resolve_198_samples() {                    # $1=truth-local -> ${LOCAL}/holdout198.samples (the held-out AoU ids)
   local TA="$1" S="${LOCAL}/holdout198.samples"
   if [ -s "$S" ]; then echo "$S"; return; fi
@@ -375,18 +395,27 @@ project_target() {                         # $1=contig -> PROJECT ACAF onto pane
   local ACAF="${LOCAL}/${TARGET_BASE}_${c}.acaf.snps.vcf.gz"
   [ -s "$ACAF" ] || { echo "ERROR: [$c] ACAF concat missing: ${ACAF} (pull phase did not complete)"; exit 1; }
 
-  # --- projection script (runs locally) ---
-  local PROJ; PROJ="$(resolve_project_script)"
-  [ -n "$PROJ" ] || { echo "ERROR: project_to_panel_rep.py not found (set PROJECT_LOCAL=/path/to/project_to_panel_rep.py)"; exit 1; }
-  echo ">> [$c] projection script: ${PROJ}"
+  # --- resolve the projector: prefer the fast Rust binary, fall back to the Python ---
+  local PROJECTOR=()
+  local PROJ_BIN; PROJ_BIN="$(resolve_project_bin)"
+  if [ -n "$PROJ_BIN" ]; then
+    echo ">> [$c] projector: rust (${PROJ_BIN})"
+    PROJECTOR=( "$PROJ_BIN" )
+  else
+    local PROJ; PROJ="$(resolve_project_script)"
+    [ -n "$PROJ" ] || { echo "ERROR: no projector found (need project_to_panel_rep.rs + rustc, or project_to_panel_rep.py; set PROJECT_BIN / PROJECT_LOCAL)"; exit 1; }
+    echo ">> [$c] projector: python (${PROJ}) -- no rustc/.rs; install rustc for the fast path"
+    PROJECTOR=( python3 "$PROJ" )
+  fi
 
   # --- panel sites TSV = the cleaned leaveout refsrc actually in the bref3 (produced by prep_panel) ---
+  # Plain (uncompressed) TSV: both the Rust (pure-std, no gzip) and Python projectors read it directly.
   local RL="${LOCAL}/refsrc_noinfo.${c}.vcf.gz" REFSRC="${WORK}/ref/refsrc_noinfo.${c}.vcf.gz"
   [ -s "$RL" ] || retry gsutil cp "${REFSRC}" "${RL}"
-  local PSITES="${LOCAL}/panel_sites.${c}.tsv.gz"
+  local PSITES="${LOCAL}/panel_sites.${c}.tsv"
   if [ ! -s "$PSITES" ]; then
     echo ">> [$c] building panel sites TSV from leaveout refsrc"
-    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${RL}" | bgzip -c > "${PSITES}.tmp" && mv "${PSITES}.tmp" "${PSITES}"
+    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${RL}" > "${PSITES}.tmp" && mv "${PSITES}.tmp" "${PSITES}"
   fi
 
   # --- PROJECT onto panel bubble-allele representation, unphase, sort ---
@@ -396,7 +425,7 @@ project_target() {                         # $1=contig -> PROJECT ACAF onto pane
   local STMP="${LOCAL}/bcfsort_${c}"; rm -rf "$STMP"; mkdir -p "$STMP"
   echo ">> [$c] projecting ACAF SNVs onto panel representation (minimal-rep matching)"
   bcftools view "$ACAF" -Ov \
-    | python3 "$PROJ" "${PSITES}" \
+    | "${PROJECTOR[@]}" "${PSITES}" \
     | bcftools sort -m "${SORT_MEM}" -T "${STMP}" -Oz -o "${TL}"
   bcftools index -t "${TL}"
   rm -rf "$STMP"

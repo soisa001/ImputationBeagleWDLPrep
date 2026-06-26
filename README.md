@@ -14,7 +14,9 @@ ACAF→panel imputation accuracy, not an optimistic panel-derived target.
 ```
 prep_imputebeagle_holdout198.sh     # STEP 1: reference (bref3) + ACAF target (split+project) + register + run
 prep_eval_holdout198.sh             # STEP 3: GLIMPSE2Concordance + GLIMPSE2Summarize on the imputed output
-project_to_panel_rep.py             # minimal-rep projection of ACAF SNVs onto panel alleles (multiallelic-aware)
+project_to_panel_rep.rs             # FAST minimal-rep projection (rustc, pure-std; the default projector)
+project_to_panel_rep.py             # reference projection (Python); the .rs is byte-identical to this
+test_projection_equivalence.sh      # asserts the Rust projector == the Python (adversarial + fuzz)
 test_bubble_representation_matching.py   # optional: quantify exact vs min-rep scaffold reach
 
 imputationbeagle_wdl_flat/          # main workflow bundle (import closure = these 4)
@@ -110,7 +112,9 @@ pre-build (e.g. to build once before launching); the prep does the same automati
 | `AOU_PGEN_GS` | acaf_threshold `pgen/` gs:// dir | ACAF PGEN source dir; expects `<contig>.pgen` + `.pvar[.zst]` + `.psam` |
 | `TARGET_FILTER` | `PASS,.` | site FILTER kept (bcftools `-f`) on the plink2 export; `PASS,.` keeps PASS + unfiltered (`.`), drops LowQual/ExcessHet/… Set `PASS` for strict, empty to disable |
 | `THREADS` | `nproc` | plink2 export + bcftools norm threads |
-| `PROJECT_LOCAL` | (auto-detect) | path to project_to_panel_rep.py |
+| `PROJECT_BIN` | (built from `.rs`) | prebuilt Rust projector; if unset, `project_to_panel_rep.rs` is built with `rustc -O` and used (byte-identical to the Python, ~10-50x faster). No rustc/.rs → falls back to the Python |
+| `PROJECT_BUILD_DIR` | `~/project-build` | where the Rust projector is built/cached (idempotent reuse) |
+| `PROJECT_LOCAL` | (auto-detect) | path to project_to_panel_rep.py (the fallback projector) |
 | `CONTIGS` | `chr1` | contig(s) |
 | `ENABLE_POP` | `true` | emit popped output |
 | `TARGET_CONCURRENT` | `true` | overlap the ACAF PGEN pull+export with the panel prep + bref3 build |
@@ -123,6 +127,10 @@ pre-build (e.g. to build once before launching); the prep does the same automati
   SNV-equivalent alleles (true + padded) are scaffolded — indels/MNVs are imputed, not scaffolded.
 - The ACAF PGEN pull+export runs concurrently with the panel prep + bref3 build by default
   (`TARGET_CONCURRENT=true`). Set `TARGET_CONCURRENT=false` for the old serial order.
+- The projection runs the Rust `project_to_panel_rep.rs` by default (built once with `rustc -O`,
+  cached in `PROJECT_BUILD_DIR`); it is a pure-std port that is **byte-identical** to
+  `project_to_panel_rep.py` (verify with `bash test_projection_equivalence.sh`) but ~10-50x faster.
+  The output is still piped through `bcftools sort` (temp on the data disk via `-T`).
 - The eval WDLs fetch tools at runtime (concordance binary via wget, cyvcf2 via conda); if the
   VPC-SC perimeter blocks that, switch them to a prebuilt/offline approach.
 - Sample-id namespace must match between panel/truth and ACAF; the prep errors if 0 of the 198 are
