@@ -140,6 +140,7 @@ TARGET_CONCURRENT="${TARGET_CONCURRENT:-true}"   # overlap the ACAF PGEN pull+ex
 # (LowQual, ExcessHet, ...) are dropped. Set TARGET_FILTER="PASS" to require an explicit PASS, or
 # TARGET_FILTER= (empty) to disable site filtering.
 TARGET_FILTER="${TARGET_FILTER-PASS,.}"
+SORT_MEM="${SORT_MEM:-2G}"        # bcftools sort max RAM before spilling to the local data disk (projection sort)
 IDEMPOTENT="${IDEMPOTENT:-true}"
 
 # ============================ preflight ======================================
@@ -389,12 +390,16 @@ project_target() {                         # $1=contig -> PROJECT ACAF onto pane
   fi
 
   # --- PROJECT onto panel bubble-allele representation, unphase, sort ---
+  # bcftools sort defaults its temp files to /tmp (the small boot disk) and can OOM/fill it on a
+  # big projection -> point -T at the local data disk and bound -m so RAM stays well under the VM.
   local TL="${LOCAL}/${TARGET_BASE}_${c}.snps.vcf.gz"
+  local STMP="${LOCAL}/bcfsort_${c}"; rm -rf "$STMP"; mkdir -p "$STMP"
   echo ">> [$c] projecting ACAF SNVs onto panel representation (minimal-rep matching)"
   bcftools view "$ACAF" -Ov \
     | python3 "$PROJ" "${PSITES}" \
-    | bcftools sort -Oz -o "${TL}"
+    | bcftools sort -m "${SORT_MEM}" -T "${STMP}" -Oz -o "${TL}"
   bcftools index -t "${TL}"
+  rm -rf "$STMP"
   echo ">> [$c] target (projected): $(bcftools query -l "${TL}" | wc -l) samples x $(bcftools index -n "${TL}") SNVs"
   gsutil cp "${TL}" "${TGT}"; gsutil cp "${TL}.tbi" "${TGT}.tbi"
 }
