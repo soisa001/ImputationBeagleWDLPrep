@@ -317,13 +317,17 @@ pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic tar
 
   # --- plink2: keep the 198, export to VCF (REF/ALT + multiallelics preserved; IID sample names) ---
   local EXP="${LOCAL}/${TARGET_BASE}_${c}.acaf"
-  echo ">> [$c] plink2 --keep 198 --export vcf (${THREADS} threads)"
-  plink2 --pfile "${PFX}" ${VZS} \
-         --keep "${KEEP}" \
-         --output-chr chrM \
-         --export vcf bgz id-paste=iid \
-         --threads "${THREADS}" \
-         --out "${EXP}"
+  if [ -s "${EXP}.vcf.gz" ]; then
+    echo ">> [$c] plink2 export exists, reusing: ${EXP}.vcf.gz"
+  else
+    echo ">> [$c] plink2 --keep 198 --export vcf (${THREADS} threads)"
+    plink2 --pfile "${PFX}" ${VZS} \
+           --keep "${KEEP}" \
+           --output-chr chrM \
+           --export vcf bgz id-paste=iid \
+           --threads "${THREADS}" \
+           --out "${EXP}"
+  fi
   [ -s "${EXP}.vcf.gz" ] || { echo "ERROR: [$c] plink2 export produced no VCF (${EXP}.vcf.gz)"; exit 1; }
 
   # --- sanity: how many of the 198 plink2 actually kept (catches IID-namespace mismatch) ---
@@ -333,7 +337,8 @@ pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic tar
   [ "$n_exp" -ge "$n_req" ] || echo ">> [$c] WARN: $((n_req - n_exp)) requested id(s) absent from the ACAF .psam"
 
   # --- sanity: FILTER distribution on the export; warn if TARGET_FILTER would be a no-op ---
-  local FILTVALS; FILTVALS="$(bcftools view -H "${EXP}.vcf.gz" 2>/dev/null | head -n 200000 | cut -f7 | sort | uniq -c | sort -rn)"
+  # (set +o pipefail in the subshell: head closes the pipe early -> bcftools SIGPIPE, which we ignore)
+  local FILTVALS; FILTVALS="$( set +o pipefail; bcftools view -H "${EXP}.vcf.gz" 2>/dev/null | head -n 200000 | cut -f7 | sort | uniq -c | sort -rn )"
   echo ">> [$c] export FILTER distribution (first 200k records):"; printf '%s\n' "$FILTVALS" | sed 's/^/      /'
   if [ -n "${TARGET_FILTER}" ] && [ -z "$(printf '%s\n' "$FILTVALS" | awk 'NF && $2!="."{print}')" ]; then
     echo ">> [$c] WARN: export FILTER is all '.' -> TARGET_FILTER='${TARGET_FILTER}' is a no-op (the .pvar carried no FILTER column). Use plink2 --var-filter or filter upstream if you need site-level filtering."
@@ -353,7 +358,7 @@ pull_acaf_target() {                       # $1=contig -> raw ACAF biallelic tar
   local NS NREC AC1
   NS="$(bcftools query -l "$ACAF" | wc -l)"
   NREC="$(bcftools index -n "$ACAF" 2>/dev/null || true)"; [ -n "$NREC" ] || NREC="$(bcftools view -H "$ACAF" 2>/dev/null | wc -l)"
-  AC1="$(bcftools view -H "$ACAF" 2>/dev/null | head -1 | cut -f1)"
+  AC1="$( set +o pipefail; bcftools view -H "$ACAF" 2>/dev/null | head -1 | cut -f1 )"
   [ "$NS" -gt 0 ] || { echo "ERROR: [$c] 0 samples in the ACAF target"; exit 1; }
   [ "${NREC:-0}" -gt 0 ] || { echo "ERROR: [$c] ACAF target has 0 records after FILTER='${TARGET_FILTER}' + norm (over-filtering, or wrong contig file?)"; exit 1; }
   [ "$AC1" = "$c" ] || echo ">> [$c] WARN: ACAF target CHROM is '${AC1}', expected '${c}' (check plink2 --output-chr vs the panel's contig naming -- the projection matches on CHROM)"
