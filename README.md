@@ -174,9 +174,11 @@ pre-build (e.g. to build once before launching); the prep does the same automati
   reports panel-only / imputed-only sites, and is order-independent and memory-bounded. The eval's
   site-matched panel no longer needs an exact record-count match with the imputed output.
 - `debug_check_outputs.sh` validates the imputation outputs end-to-end: that the popped output is truly
-  popped (biallelic atomic, single-token `INFO/ID`, `FORMAT=GT:DS:GP`, `DS == gp1+2*gp2`) and that its
-  sites are a subset of `panel_popped_vcf` / the id-split panel; that the un-popped output's sites are a
-  subset of the bubble.split leaveout panel; and it reproduces the Summarize alignment to flag any
-  residual desync. Read-only; streams panel sites (set `USER_PROJECT` for requester-pays reads).
+  popped (biallelic atomic, single-token `INFO/ID`, `FORMAT=GT:DS:GP`, `DS == gp1+2*gp2`); that each
+  popped allele is **minimal/parsimonious** (no trimmable flanking bases -> bubbles really collapsed to
+  simple atomic constituents, with a bubble-vs-popped allele-length comparison); that its sites are a
+  subset of `panel_popped_vcf` / the id-split panel; that the un-popped output's sites are a subset of
+  the bubble.split leaveout panel; and it checks the Summarize merge-join alignment. Read-only; streams
+  panel sites (set `USER_PROJECT` for requester-pays reads).
 - Sample-id namespace must match between panel/truth and ACAF; the prep errors if 0 of the 198 are
   found and reports the count otherwise.

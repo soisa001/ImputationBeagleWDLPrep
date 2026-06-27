@@ -201,6 +201,28 @@ if [ -n "${POPPED_OUT}" ]; then
   else
     WARN "${UNMATCHED} imputed keys absent from the site-matched panel (merge-join skips them as target-only; see ${WORK}/imputed_not_in_sitematched.keys)"
   fi
+
+  # C9: representation simplicity -- is each bubble actually COLLAPSED to simple atomic constituents?
+  #     The pop engine emits each constituent's (REF,ALT) verbatim from the id-split panel, so a popped
+  #     allele should be a MINIMAL/parsimonious VCF record (no trimmable flanking bases). Flag any popped
+  #     allele that could still be trimmed further -- i.e. a "longer allele" that was not reduced to its
+  #     simplest form -- and summarise allele lengths so the collapse vs the bubble form is visible.
+  hdr "POPPED representation simplicity (minimal/parsimonious atomic alleles)"
+  rm -f "${WORK}/popped_nonminimal.examples"
+  NONMIN="$(bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${PL}" | awk -F'\t' -v ex="${WORK}/popped_nonminimal.examples" '
+      function trim(pos,ref,alt,   r,a,p){ r=ref;a=alt;p=pos;
+        while(length(r)>1 && length(a)>1 && substr(r,length(r),1)==substr(a,length(a),1)){r=substr(r,1,length(r)-1);a=substr(a,1,length(a)-1)}
+        while(length(r)>1 && length(a)>1 && substr(r,1,1)==substr(a,1,1)){r=substr(r,2);a=substr(a,2);p++}
+        return p"\t"r"\t"a }
+      { if($2"\t"$3"\t"$4 != trim($2,$3,$4)){ n++; if(c<8){print "  "$1":"$2" "$3">"$4"  ->  minimal "trim($2,$3,$4) >> ex; c++} } }
+      END{ print n+0 }')"
+  if [ "${NONMIN}" -eq 0 ]; then PASS "all ${NIMP} popped alleles are minimal/parsimonious (no trimmable flanking bases -> truly collapsed to atomic form)"; \
+    else WARN "${NONMIN} popped alleles still carry trimmable flanking bases (not reduced to simplest form); examples:"; sed 's/^/    /' "${WORK}/popped_nonminimal.examples"; fi
+  POP_LEN="$(bcftools query -f '%REF\t%ALT\n' "${PL}" | awk -F'\t' '
+      { lr=length($1);la=length($2);span=(lr>la?lr:la); tot++; sum+=span; if(span>mx)mx=span; if(lr==1&&la==1)snv++ }
+      END{ if(tot>0) printf "alleles=%d  SNV=%.1f%%  span(max ref/alt len) mean=%.2f max=%d", tot,100*snv/tot,sum/tot,mx }')"
+  echo "  popped allele lengths: ${POP_LEN}"
+  printf '%s' "${POP_LEN}" > "${WORK}/popped_len.summary"
 else
   WARN "no popped output found/given -- skipping popped checks"
 fi
@@ -222,6 +244,18 @@ if [ -n "${UNPOPPED_OUT}" ]; then
   # U2: biallelic (bubble.split is split to biallelic)
   NMU="$( ( set +o pipefail; bcftools query -f '%ALT\n' "${UL}" | grep -c ',' ) || true )"
   if [ "${NMU:-0}" -eq 0 ]; then PASS "all records biallelic (bubble.split)"; else FAIL "${NMU} multiallelic ALT records (expected split)"; fi
+
+  # Collapse evidence: bubble (un-popped) vs popped constituent allele lengths. Bubbles are composite
+  # (often long, spanning the bubble); popping should LOWER mean/max span and RAISE SNV%.
+  BUB_LEN="$(bcftools query -f '%REF\t%ALT\n' "${UL}" | awk -F'\t' '
+      { lr=length($1);la=length($2);span=(lr>la?lr:la); tot++; sum+=span; if(span>mx)mx=span; if(lr==1&&la==1)snv++ }
+      END{ if(tot>0) printf "alleles=%d  SNV=%.1f%%  span(max ref/alt len) mean=%.2f max=%d", tot,100*snv/tot,sum/tot,mx }')"
+  echo "  bubble allele lengths: ${BUB_LEN}"
+  if [ -s "${WORK}/popped_len.summary" ]; then
+    echo "  --- collapse check (bubble -> popped should shrink span / raise SNV%) ---"
+    echo "      bubble : ${BUB_LEN}"
+    echo "      popped : $(cat "${WORK}/popped_len.summary")"
+  fi
 
   UOUT_KEYS="${WORK}/unpopped_out.keys"
   bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${UL}" | LC_ALL=C sort -u > "${UOUT_KEYS}"
