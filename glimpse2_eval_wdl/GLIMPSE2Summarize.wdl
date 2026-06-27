@@ -131,93 +131,157 @@ task SummarizeAndPlot {
         c_is_hom_ref = np.empty(num_c_samples, dtype=bool)
         c_is_hom_alt = np.empty(num_c_samples, dtype=bool)
 
-        # 3. Stream Variants with Native C-Extracted Logic
-        print("Streaming variants...", flush=True)
+        # 3. Stream variants with a (CHROM,POS,REF,ALT) merge-join.
+        #    The site-matched panel and the imputed output are both coordinate-sorted, but at a
+        #    multiallelic position they need not carry the same allele SET or ORDER (e.g. panel
+        #    chr1:10626 A>AG vs imputed chr1:10626 A>AGGCGCAG), so a positional zip() desyncs and
+        #    raises "VCFs are out of sync". Instead we walk both as position-blocks and pair records
+        #    by exact (REF,ALT) within each position -- order-independent, tolerant of allele-set
+        #    differences, memory-bounded (one position block per file at a time). Only matched sites
+        #    contribute to the AF correlation (the only places where it is meaningful anyway);
+        #    panel-only / target-only sites are counted and reported.
+        print("Streaming variants (merge-join on CHROM,POS,REF,ALT)...", flush=True)
         variants_processed = 0
+        panel_only = 0
+        target_only = 0
         start_time = time.time()
 
-        for p_var, c_var in zip(panel_vcf, imputed_vcf):
-            # Strict safety check to ensure perfect sync
-            if p_var.CHROM != c_var.CHROM or p_var.POS != c_var.POS or p_var.REF != c_var.REF or p_var.ALT != c_var.ALT:
-                p_alt_str = p_var.ALT[0] if p_var.ALT else "."
-                c_alt_str = c_var.ALT[0] if c_var.ALT else "."
-                raise ValueError(
-                    f"VCFs are out of sync!\n"
-                    f"Panel : {p_var.CHROM}:{p_var.POS} {p_var.REF}>{p_alt_str}\n"
-                    f"Target: {c_var.CHROM}:{c_var.POS} {c_var.REF}>{c_alt_str}"
-                )
+        # contig rank for cross-file position ordering (assumes a shared reference)
+        try:
+            chrom_rank = {c: i for i, c in enumerate(imputed_vcf.seqnames)}
+        except Exception:
+            chrom_rank = {}
+        def pos_order(chrom, pos):
+            return (chrom_rank.get(chrom, 1 << 30), pos)
 
-            alts = p_var.ALT
-            if not alts: continue
-            
-            altlen = len(alts[0]) - len(p_var.REF)
-            altlen_all.append(altlen)
-            
-            is_ins = altlen >= 50
-            is_del = altlen <= -50
+        def pos_blocks(vcf):
+            # yield ((CHROM, POS), [variants at that position]); input is coordinate-sorted
+            block = []
+            key = None
+            for v in vcf:
+                k = (v.CHROM, v.POS)
+                if key is not None and k != key:
+                    yield key, block
+                    block = []
+                block.append(v)
+                key = k
+            if block:
+                yield key, block
 
-            # --- Panel Extraction ---
-            p_gt = p_var.gt_types
-            # Write directly into pre-allocated boolean buffers
-            np.equal(p_gt, 1, out=p_is_het)
-            np.equal(p_gt, 0, out=p_is_hom_ref)
-            np.equal(p_gt, 3, out=p_is_hom_alt)
-            
-            # Update sample stats
-            p_het_all += p_is_het
-            p_hom_ref_all += p_is_hom_ref
-            p_hom_alt_all += p_is_hom_alt
-            if is_ins: p_het_ins += p_is_het
-            elif is_del: p_het_del += p_is_het
-            
-            # Use native C-level property extractions to avoid python .sum()
-            p_n_het = p_var.num_het
-            p_n_hom_ref = p_var.num_hom_ref
-            p_n_hom_alt = p_var.num_hom_alt
-            
-            panel_hwe['hom_ref'].append(p_n_hom_ref)
-            panel_hwe['het'].append(p_n_het)
-            panel_hwe['hom_alt'].append(p_n_hom_alt)
-            
-            p_valid = (p_n_hom_ref + p_n_het + p_n_hom_alt) * 2
-            p_alt_count = p_n_het + 2 * p_n_hom_alt
-            panel_af_all.append(p_alt_count / p_valid if p_valid > 0 else 0.0)
-            panel_mean_alt_alleles_all.append(p_alt_count / num_p_samples)
+        def allele_key(v):
+            return (v.REF, v.ALT[0] if v.ALT else ".")
 
-            # --- Target Extraction ---
-            c_gt = c_var.gt_types
-            np.equal(c_gt, 1, out=c_is_het)
-            np.equal(c_gt, 0, out=c_is_hom_ref)
-            np.equal(c_gt, 3, out=c_is_hom_alt)
-            
-            c_het_all += c_is_het
-            c_hom_ref_all += c_is_hom_ref
-            c_hom_alt_all += c_is_hom_alt
-            if is_ins: c_het_ins += c_is_het
-            elif is_del: c_het_del += c_is_het
-            
-            c_n_het = c_var.num_het
-            c_n_hom_ref = c_var.num_hom_ref
-            c_n_hom_alt = c_var.num_hom_alt
-            
-            target_hwe['hom_ref'].append(c_n_hom_ref)
-            target_hwe['het'].append(c_n_het)
-            target_hwe['hom_alt'].append(c_n_hom_alt)
-            
-            c_valid = (c_n_hom_ref + c_n_het + c_n_hom_alt) * 2
-            c_alt_count = c_n_het + 2 * c_n_hom_alt
-            target_af_all.append(c_alt_count / c_valid if c_valid > 0 else 0.0)
-            target_mean_alt_alleles_all.append(c_alt_count / num_c_samples)
+        pit = pos_blocks(panel_vcf)
+        cit = pos_blocks(imputed_vcf)
+        pb = next(pit, None)
+        cb = next(cit, None)
 
-            variants_processed += 1
-            if variants_processed % 10000 == 0:
-                elapsed_secs = time.time() - start_time
-                elapsed_str = str(timedelta(seconds=int(elapsed_secs)))
-                print(f"Processed {variants_processed:,} records... [Elapsed: {elapsed_str}] [Location: {p_var.CHROM}:{p_var.POS}]", flush=True)
+        while pb is not None and cb is not None:
+            p_key, p_block = pb
+            c_key, c_block = cb
+            if p_key == c_key:
+                p_amap = {}
+                for v in p_block:
+                    p_amap.setdefault(allele_key(v), v)
+                c_amap = {}
+                for v in c_block:
+                    c_amap.setdefault(allele_key(v), v)
+
+                for ak, c_var in c_amap.items():
+                    p_var = p_amap.get(ak)
+                    if p_var is None:
+                        target_only += 1
+                        continue
+
+                    alts = p_var.ALT
+                    if not alts:
+                        continue
+
+                    altlen = len(alts[0]) - len(p_var.REF)
+                    altlen_all.append(altlen)
+
+                    is_ins = altlen >= 50
+                    is_del = altlen <= -50
+
+                    # --- Panel Extraction ---
+                    p_gt = p_var.gt_types
+                    np.equal(p_gt, 1, out=p_is_het)
+                    np.equal(p_gt, 0, out=p_is_hom_ref)
+                    np.equal(p_gt, 3, out=p_is_hom_alt)
+
+                    p_het_all += p_is_het
+                    p_hom_ref_all += p_is_hom_ref
+                    p_hom_alt_all += p_is_hom_alt
+                    if is_ins: p_het_ins += p_is_het
+                    elif is_del: p_het_del += p_is_het
+
+                    p_n_het = p_var.num_het
+                    p_n_hom_ref = p_var.num_hom_ref
+                    p_n_hom_alt = p_var.num_hom_alt
+
+                    panel_hwe['hom_ref'].append(p_n_hom_ref)
+                    panel_hwe['het'].append(p_n_het)
+                    panel_hwe['hom_alt'].append(p_n_hom_alt)
+
+                    p_valid = (p_n_hom_ref + p_n_het + p_n_hom_alt) * 2
+                    p_alt_count = p_n_het + 2 * p_n_hom_alt
+                    panel_af_all.append(p_alt_count / p_valid if p_valid > 0 else 0.0)
+                    panel_mean_alt_alleles_all.append(p_alt_count / num_p_samples)
+
+                    # --- Target Extraction ---
+                    c_gt = c_var.gt_types
+                    np.equal(c_gt, 1, out=c_is_het)
+                    np.equal(c_gt, 0, out=c_is_hom_ref)
+                    np.equal(c_gt, 3, out=c_is_hom_alt)
+
+                    c_het_all += c_is_het
+                    c_hom_ref_all += c_is_hom_ref
+                    c_hom_alt_all += c_is_hom_alt
+                    if is_ins: c_het_ins += c_is_het
+                    elif is_del: c_het_del += c_is_het
+
+                    c_n_het = c_var.num_het
+                    c_n_hom_ref = c_var.num_hom_ref
+                    c_n_hom_alt = c_var.num_hom_alt
+
+                    target_hwe['hom_ref'].append(c_n_hom_ref)
+                    target_hwe['het'].append(c_n_het)
+                    target_hwe['hom_alt'].append(c_n_hom_alt)
+
+                    c_valid = (c_n_hom_ref + c_n_het + c_n_hom_alt) * 2
+                    c_alt_count = c_n_het + 2 * c_n_hom_alt
+                    target_af_all.append(c_alt_count / c_valid if c_valid > 0 else 0.0)
+                    target_mean_alt_alleles_all.append(c_alt_count / num_c_samples)
+
+                    variants_processed += 1
+                    if variants_processed % 10000 == 0:
+                        elapsed_secs = time.time() - start_time
+                        elapsed_str = str(timedelta(seconds=int(elapsed_secs)))
+                        print(f"Processed {variants_processed:,} matched records... [Elapsed: {elapsed_str}] [Location: {p_var.CHROM}:{p_var.POS}]", flush=True)
+
+                panel_only += sum(1 for ak in p_amap if ak not in c_amap)
+                pb = next(pit, None)
+                cb = next(cit, None)
+            elif pos_order(*p_key) < pos_order(*c_key):
+                panel_only += len(p_block)
+                pb = next(pit, None)
+            else:
+                target_only += len(c_block)
+                cb = next(cit, None)
+
+        # drain remainders (unmatched tails) for the report
+        while pb is not None:
+            panel_only += len(pb[1]); pb = next(pit, None)
+        while cb is not None:
+            target_only += len(cb[1]); cb = next(cit, None)
 
         elapsed_secs = time.time() - start_time
         elapsed_str = str(timedelta(seconds=int(elapsed_secs)))
-        print(f"\nFinished processing {variants_processed:,} total variants in {elapsed_str}.", flush=True)
+        print(f"\nFinished: {variants_processed:,} matched sites in {elapsed_str}. "
+              f"(panel-only: {panel_only:,}, target-only: {target_only:,})", flush=True)
+        if variants_processed == 0:
+            raise ValueError("No (CHROM,POS,REF,ALT)-matched sites between the panel and imputed VCFs "
+                             "-- check the site-matched panel build (chrom naming / allele representation).")
 
         # Assign sample stats back into original dict structure for plotting
         sample_stats = {

@@ -354,10 +354,11 @@ if [ "${ENABLE_SUMMARIZE}" = "true" ]; then
       PS_L="${LOCAL}/panel.${REGION}${EVAL_TAG}.site_matched.vcf.gz"
       bcftools view -T "${SITES}" -m2 -M2 "${FULL_L}" -Oz -o "${PS_L}"
       tabix -p vcf "${PS_L}"
-      # guard: record counts should match (imputed subset of panel sites)
+      # Record counts need NOT match exactly: GLIMPSE2Summarize now merge-joins panel vs imputed on
+      # (CHROM,POS,REF,ALT), so panel-only / imputed-only alleles at a shared position are simply
+      # skipped (and reported) instead of desyncing a positional zip. A large gap is still worth a look.
       NI="$(bcftools index -n "${IMP_L}")"; NP="$(bcftools index -n "${PS_L}")"
-      echo ">> site-matched panel records: ${NP}  (imputed: ${NI})"
-      [ "${NP}" = "${NI}" ] || echo ">> WARNING: panel(${NP}) != imputed(${NI}) record count; Summarize zip may fail. Inspect before relying on Step D."
+      echo ">> site-matched panel records: ${NP}  (imputed: ${NI}; Summarize aligns by allele, exact match not required)"
       gsutil cp "${PS_L}" "${PANEL_SUMM_VCF}"; gsutil cp "${PS_L}.tbi" "${PANEL_SUMM_IDX}"
     fi
   fi
