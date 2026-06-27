@@ -170,43 +170,36 @@ if [ -n "${POPPED_OUT}" ]; then
   if [ "${M2}" -eq 0 ]; then PASS "all popped keys present in id-split panel (atomic source)"; \
     else WARN "${M2} popped keys NOT in id-split panel (see ${WORK}/popped_not_in_idsplit.keys)"; fi
 
-  # C8: reproduce the GLIMPSE2Summarize zip() alignment against the site-matched panel.
-  #     The eval builds the panel via `bcftools view -T <imputed sites> -m2 -M2`; the Summarize python
-  #     then zips the two record streams. If the per-position allele SET or ORDER differs, zip desyncs
-  #     ("VCFs are out of sync"). Here we re-derive the panel ordering bcftools would emit and find the
-  #     first position where the popped output and the site-matched panel disagree.
-  hdr "POPPED Summarize-alignment check (reproduces the zip() lockstep)"
+  # C8: check the GLIMPSE2Summarize (CHROM,POS,REF,ALT) merge-join against the site-matched panel.
+  #     The eval builds the panel via `bcftools view -T <imputed sites> -m2 -M2` (position- not
+  #     allele-aware), so at a multiallelic position the panel keeps MORE alleles than the imputed
+  #     carries -> the panel record count is legitimately larger. The Summarize merge-join pairs by
+  #     exact (REF,ALT), so what matters is: (a) every imputed key is present in the site-matched
+  #     panel (-> all imputed sites get scored), and (b) how many panel-only alleles get skipped.
+  hdr "POPPED Summarize-alignment check (merge-join on CHROM,POS,REF,ALT)"
   SITES_T="${WORK}/popped_out.sites.tsv"
   bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${PL}" | bgzip > "${SITES_T}.gz"
   tabix -s1 -b2 -e2 "${SITES_T}.gz"
-  # panel restricted to the imputed sites, in panel/bcftools order (what the eval's -T produces)
-  SM_KEYS="${WORK}/site_matched_panel.keys.ordered"
+  # panel restricted to the imputed sites (what the eval's -T produces), as sorted-unique keys
+  SM_KEYS="${WORK}/site_matched_panel.keys"
   if [[ "${POPPED_PANEL}" == gs://* ]]; then
     # shellcheck disable=SC2046
     gsutil $(gsargs) cat "${POPPED_PANEL}" \
       | bcftools view -T "${SITES_T}.gz" -m2 -M2 - 2>/dev/null \
-      | bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' - > "${SM_KEYS}" || true
+      | bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' - | LC_ALL=C sort -u > "${SM_KEYS}" || true
   else
     bcftools view -T "${SITES_T}.gz" -m2 -M2 "${POPPED_PANEL}" \
-      | bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' - > "${SM_KEYS}" || true
+      | bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' - | LC_ALL=C sort -u > "${SM_KEYS}" || true
   fi
-  # popped output keys in FILE order (NOT sorted-unique) = the order Summarize sees on the imputed side
-  POUT_ORDERED="${WORK}/popped_out.keys.ordered"
-  bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${PL}" > "${POUT_ORDERED}"
-  NP="$(wc -l < "${SM_KEYS}")"; NI="$(wc -l < "${POUT_ORDERED}")"
-  echo "  site-matched panel records: ${NP}   imputed records: ${NI}"
-  if [ "${NP}" != "${NI}" ]; then
-    FAIL "record COUNT differs (panel ${NP} vs imputed ${NI}) -> Summarize zip() WILL desync. Root cause: 'bcftools view -T' is position- not allele-aware, so the panel keeps alleles the imputed lacks (and/or drops some)."
-  fi
-  # first position where the lockstep pair disagrees
-  DESYNC="$(paste "${SM_KEYS}" "${POUT_ORDERED}" | awk -F'\t' '
-      { pk=$1":"$2" "$3">"$4; ik=$5":"$6" "$7">"$8;
-        if(pk!=ik){ print "first desync at row "NR": panel "pk" | imputed "ik; bad=1; exit } }
-      END{ if(!bad) print "OK" }')"
-  if [ "${DESYNC}" = "OK" ] && [ "${NP}" = "${NI}" ]; then
-    PASS "site-matched panel and popped output are perfectly lockstep-aligned (Summarize zip will succeed)"
+  NSMP="$(wc -l < "${SM_KEYS}")"; NIMP="$(wc -l < "${POUT_KEYS}")"
+  UNMATCHED="$(missing_keys "${POUT_KEYS}" "${SM_KEYS}" "${WORK}/imputed_not_in_sitematched.keys")"
+  MATCHED=$(( NIMP - UNMATCHED )); PANELONLY=$(( NSMP - MATCHED ))
+  echo "  site-matched panel unique keys: ${NSMP}   imputed unique keys: ${NIMP}"
+  echo "  merge-join: matched=${MATCHED}  imputed-only(skipped)=${UNMATCHED}  panel-only(skipped)=${PANELONLY}"
+  if [ "${UNMATCHED}" -eq 0 ]; then
+    PASS "merge-join aligns ALL ${MATCHED} imputed sites; ${PANELONLY} panel-only alleles skipped (expected: -T keeps extra multiallelic alleles). Summarize will NOT desync."
   else
-    FAIL "Summarize lockstep alignment broken: ${DESYNC}"
+    WARN "${UNMATCHED} imputed keys absent from the site-matched panel (merge-join skips them as target-only; see ${WORK}/imputed_not_in_sitematched.keys)"
   fi
 else
   WARN "no popped output found/given -- skipping popped checks"
