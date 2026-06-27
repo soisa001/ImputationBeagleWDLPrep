@@ -142,7 +142,12 @@ pre-build (e.g. to build once before launching); the prep does the same automati
   binary is vendored (`glimpse2_eval_wdl/GLIMPSE2_concordance_static`); the eval prep stages it to the
   bucket and passes it as the `concordance_binary` input. After updating the eval WDL, re-run the eval
   with `FORCE_WF_REGISTER=true` once so the new WDL is re-uploaded + re-registered.
-- Step D (Summarize) still conda-installs cyvcf2 at runtime; if the perimeter blocks that too, it will
-  need the same prebuilt/offline treatment.
+- The perimeter also blocks the Summarize WDL's `conda install cyvcf2 pandas numpy matplotlib seaborn
+  scipy`, so the eval prep builds a pip wheelhouse (cp311 manylinux) on the notebook VM, stages it to
+  the bucket, and passes it as the `summarize_wheelhouse` input; the task installs offline with
+  `pip install --no-index --find-links` (docker pinned to `python:3.11-slim` to match the cp311 wheels,
+  `MPLBACKEND=Agg` for headless plotting). Override with `SUMMARIZE_WHEELHOUSE=gs://...` to supply a
+  prebuilt wheelhouse (e.g. if this VM lacks PyPI egress). As with Concordance, re-run the eval with
+  `FORCE_WF_REGISTER=true` once after updating the WDL.
 - Sample-id namespace must match between panel/truth and ACAF; the prep errors if 0 of the 198 are
   found and reports the count otherwise.
