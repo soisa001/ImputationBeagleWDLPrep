@@ -142,6 +142,24 @@ pre-build (e.g. to build once before launching); the prep does the same automati
   binary is vendored (`glimpse2_eval_wdl/GLIMPSE2_concordance_static`); the eval prep stages it to the
   bucket and passes it as the `concordance_binary` input. After updating the eval WDL, re-run the eval
   with `FORCE_WF_REGISTER=true` once so the new WDL is re-uploaded + re-registered.
+- The Concordance WDL also emits **per-sample precision/recall + false-positive metrics** alongside the
+  NRC boxplot, derived from GLIMPSE's per-sample `.error.spl` confusion counts (no extra passes over the
+  data, so the binning matches the NRC plot exactly):
+    - `<prefix>.per_sample_metrics.tsv` — one row per (sample × TRH bin × length bin × GP filter) with the
+      raw confusion counts (`n_truth_RR/RA/AA`, `match_*`, `mismatch_*`) and derived rates:
+      `nonref_recall` (exact-GT sensitivity for alt carriers), `het_recall`, `homalt_recall`,
+      `false_pos_rate` (truth hom-ref called as carrying an alt — "called but not in truth"),
+      `nonref_concordance` (= 1 − NRD, the boxplot metric), `overall_gt_concordance` (exact match incl.
+      hom-ref — the inflated "raw GT match rate"), `carrier_error_rate_upperbound`, and `ppv_vs_homref`.
+    - `<prefix>.{in,out}TRH.recall_fpr.png` — recall + FP-rate boxplots in the same layout as the NRC plot.
+  **Caveat (by design of GLIMPSE's output):** GLIMPSE reports matches/mismatches grouped by the *truth*
+  genotype class, so hom-ref→alt **false positives are exact**, but a clean **false-negative** rate is
+  *not* recoverable — a truth-het scored as a mismatch could be "called hom-ref" (a true miss) or "called
+  hom-alt" (a genotype swap, still a detected variant), and the aggregates don't separate them.
+  `carrier_error_rate_upperbound` (= 1 − `nonref_recall`) bounds the miss/FN rate from above, and
+  `ppv_vs_homref` is precision counting only hom-ref false positives (swaps excluded), not a full PPV. An
+  exact 3×3 (and thus exact precision/FN) would require re-streaming the genotypes rather than reading
+  GLIMPSE's per-truth-class counts.
 - The perimeter also blocks the Summarize WDL's `conda install cyvcf2 pandas numpy matplotlib seaborn
   scipy`, so the eval prep builds a pip wheelhouse (cp311 manylinux) on the notebook VM, stages it to
   the bucket, and passes it as the `summarize_wheelhouse` input; the task installs offline with

@@ -56,7 +56,8 @@ workflow GLIMPSE2Concordance {
     }
 
     output {
-        Array[File] concordance_plots = [PlotResults.r2_plot_inTRH, PlotResults.r2_plot_outTRH, PlotResults.nrd_plot_inTRH, PlotResults.nrd_plot_outTRH]
+        Array[File] concordance_plots = [PlotResults.r2_plot_inTRH, PlotResults.r2_plot_outTRH, PlotResults.nrd_plot_inTRH, PlotResults.nrd_plot_outTRH, PlotResults.recall_fpr_plot_inTRH, PlotResults.recall_fpr_plot_outTRH]
+        File per_sample_metrics_tsv = PlotResults.per_sample_metrics_tsv
         Array[Array[File]] concordance_results = [all_rsquare_grp_files, all_rsquare_spl_files, all_error_grp_files, all_error_spl_files, all_error_cal_files]
     }
 }
@@ -360,6 +361,100 @@ task PlotResults {
                 plt.tight_layout()
                 plt.savefig(f'~{output_prefix}.{trh_bin}.nrd.png', bbox_inches='tight')
             plt.close()
+
+        # 6. Per-sample precision/recall + FP/FN from the genotype confusion counts.
+        #    GLIMPSE reports matches/mismatches grouped by the TRUTH genotype class, so:
+        #      - false positives (truth hom-ref called as carrying an alt) are EXACT (mismatch_RR);
+        #      - non-ref recall / overall concordance / NRC are EXACT;
+        #      - a clean false-NEGATIVE rate is NOT recoverable: het/hom-alt mismatches lump
+        #        "called hom-ref" (a true miss) with "called the other non-ref genotype" (a
+        #        genotype swap, still a detected variant). We report carrier_error_rate as the
+        #        UPPER bound on the miss/FN rate, and PPV only vs hom-ref FPs (swaps excluded).
+        #        The full 3x3 (and thus exact precision/FN) would need the genotypes, not these
+        #        per-truth-class aggregates -- see README.
+        print("Computing per-sample concordance metrics...", flush=True)
+        # field order per GLIMPSE2 concordance .error.spl (call_set_writing.cpp), tag GCsV = SNP+indel
+        count_cols = ('tag idx sample_name val_RR val_RA val_AA filtered_gp '
+                      'mRR mRA mAA xRR xRA xAA '
+                      'fp_rate_pct het_mm_rate_pct homalt_mm_rate_pct '
+                      'nrd_pct best_gt_r2 ds_r2').split()
+        metric_rows = []
+        for filepath in error_files:
+            if not filepath.strip(): continue
+            filename = os.path.basename(filepath)
+            parts = filename.split('_GPfilt_')
+            prefix_parts = parts[0].split('.')
+            length_bin = prefix_parts[-2]
+            trh_bin = prefix_parts[-3]
+            min_tar_gp = float(parts[1].split('.error')[0])
+
+            df = pd.read_csv(filepath, sep=' ', comment='#', names=count_cols)
+            df = df[df['tag'] == 'GCsV']
+            for _, r in df.iterrows():
+                val_RR, val_RA, val_AA = float(r['val_RR']), float(r['val_RA']), float(r['val_AA'])
+                mRR, mRA, mAA = float(r['mRR']), float(r['mRA']), float(r['mAA'])
+                xRR, xRA, xAA = float(r['xRR']), float(r['xRA']), float(r['xAA'])
+
+                nonref_true  = val_RA + val_AA           # condition-positive: truth carries an alt
+                nonref_match = mRA + mAA                 # exact-GT recovery of those
+                nonref_mm    = xRA + xAA                 # truth-carrier miscalls (miss OR swap)
+                total_gt     = val_RR + val_RA + val_AA
+
+                nan = float('nan')
+                recall        = nonref_match / nonref_true if nonref_true > 0 else nan   # exact-GT sensitivity
+                het_recall    = mRA / val_RA if val_RA > 0 else nan
+                homalt_recall = mAA / val_AA if val_AA > 0 else nan
+                fp_rate       = xRR / val_RR if val_RR > 0 else nan                      # truth hom-ref -> alt (exact)
+                nrc           = nonref_match / (nonref_match + xRR + nonref_mm) if (nonref_match + xRR + nonref_mm) > 0 else nan
+                gt_conc       = (mRR + mRA + mAA) / total_gt if total_gt > 0 else nan    # overall exact-match (incl hom-ref)
+                carrier_err   = nonref_mm / nonref_true if nonref_true > 0 else nan      # UPPER bound on miss/FN rate
+                ppv_vs_homref = nonref_match / (nonref_match + xRR) if (nonref_match + xRR) > 0 else nan
+
+                metric_rows.append([
+                    trh_bin, length_bin, min_tar_gp, r['sample_name'],
+                    int(val_RR), int(val_RA), int(val_AA),
+                    int(mRR), int(mRA), int(mAA), int(xRR), int(xRA), int(xAA),
+                    recall, het_recall, homalt_recall, fp_rate, nrc, gt_conc, carrier_err, ppv_vs_homref,
+                ])
+
+        metrics_df = pd.DataFrame(metric_rows, columns=[
+            'TRH_BIN', 'LENGTH_BIN', 'MIN_TAR_GP', 'sample_name',
+            'n_truth_RR', 'n_truth_RA', 'n_truth_AA',
+            'match_RR', 'match_RA', 'match_AA', 'mismatch_RR_FP', 'mismatch_RA', 'mismatch_AA',
+            'nonref_recall', 'het_recall', 'homalt_recall', 'false_pos_rate', 'nonref_concordance',
+            'overall_gt_concordance', 'carrier_error_rate_upperbound', 'ppv_vs_homref',
+        ])
+        metrics_df.to_csv(f'~{output_prefix}.per_sample_metrics.tsv', sep='\t', index=False)
+        print(f"Wrote {metrics_df.shape[0]} per-sample metric rows -> ~{output_prefix}.per_sample_metrics.tsv", flush=True)
+
+        # 7. Recall + FP-rate boxplots (mirror the NRC plot layout: length bins x GP filter)
+        length_label = {'SV_DEL': '(-inf, -50]', 'DEL': '(-50, -1]', 'SNP': 'SNP', 'INS': '[0, 50)', 'SV_INS': '[50, inf)'}
+        panels = [('nonref_recall', 'non-ref recall (sensitivity)', [0, 1.01]),
+                  ('false_pos_rate', 'false-positive rate (hom-ref -> alt)', None)]
+        for trh_bin in ['outTRH', 'inTRH']:
+            sub = metrics_df[metrics_df['TRH_BIN'] == trh_bin]
+            trh_tag = {'outTRH': 'non-TR/homopolymer', 'inTRH': 'TR/homopolymer'}[trh_bin]
+            fig, axes = plt.subplots(1, 2, figsize=(11, 3))
+            for ax, (col, ylab, ylim) in zip(axes, panels):
+                rows = []
+                for length_bin in ['SV_DEL', 'DEL', 'SNP', 'INS', 'SV_INS']:
+                    for min_tar_gp in [0.0, 0.9]:
+                        gp_lab = 'unfiltered' if min_tar_gp == 0.0 else f'GP > {min_tar_gp}'
+                        m = (sub['LENGTH_BIN'] == length_bin) & (sub['MIN_TAR_GP'] == min_tar_gp)
+                        for v in sub[m][col].values:
+                            rows.append([length_label[length_bin], gp_lab, v])
+                if rows:
+                    bx = pd.DataFrame(rows, columns=['LENGTH_BIN_TEXT', 'GP', 'val'])
+                    sns.boxplot(data=bx, x='LENGTH_BIN_TEXT', y='val', hue='GP', ax=ax)
+                    ax.legend(loc='best', fontsize=7)
+                ax.set_xlabel('ALT length - REF length (bp)', fontsize=8)
+                ax.set_ylabel(ylab, fontsize=8)
+                if ylim is not None:
+                    ax.set_ylim(ylim)
+            fig.suptitle(f"{title_metadata}\n{trh_tag}", fontsize=9)
+            plt.tight_layout()
+            plt.savefig(f'~{output_prefix}.{trh_bin}.recall_fpr.png', bbox_inches='tight')
+            plt.close()
         EOF
 
         python3 plot_script.py "~{sep=',' rsquare_grp_files}" "~{sep=',' error_spl_files}" "~{panel_name}" "~{imputed_name}"
@@ -370,6 +465,9 @@ task PlotResults {
         File r2_plot_outTRH = "~{output_prefix}.outTRH.r2.png"
         File nrd_plot_inTRH = "~{output_prefix}.inTRH.nrd.png"
         File nrd_plot_outTRH = "~{output_prefix}.outTRH.nrd.png"
+        File recall_fpr_plot_inTRH = "~{output_prefix}.inTRH.recall_fpr.png"
+        File recall_fpr_plot_outTRH = "~{output_prefix}.outTRH.recall_fpr.png"
+        File per_sample_metrics_tsv = "~{output_prefix}.per_sample_metrics.tsv"
     }
 
     #########################
