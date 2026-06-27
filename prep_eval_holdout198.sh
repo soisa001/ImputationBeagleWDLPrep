@@ -98,6 +98,12 @@ ENABLE_SUMMARIZE="${ENABLE_SUMMARIZE:-true}"
 POP_TSV="${POP_TSV:-}"                             # optional igsr-style TSV ("Sample name","Population code"). If unset, a one-population TSV (code "ALL") is auto-generated.
 PANEL_SUMM_VCF="${PANEL_SUMM_VCF:-}"               # optional: pre-built site-matched panel (skips the heavy build)
 PANEL_SUMM_IDX="${PANEL_SUMM_IDX:-${PANEL_SUMM_VCF}.tbi}"
+# Summarize python deps: the WDL task can't reach anaconda/PyPI (perimeter), so a pip wheelhouse is
+# built here (this VM has egress) and passed to the task for an offline `pip install`. Must match the
+# task's python (python:3.11-slim -> cp311 manylinux).
+SUMMARIZE_WHEELHOUSE="${SUMMARIZE_WHEELHOUSE:-}"   # gs:// to a prebuilt wheelhouse.tar.gz (skips the build)
+SUMMARIZE_PY_PKGS="${SUMMARIZE_PY_PKGS:-cyvcf2 pandas numpy matplotlib seaborn scipy}"
+SUMMARIZE_PY_VER="${SUMMARIZE_PY_VER:-311}"
 
 # ---- registration ----
 WF_CONC="${WF_CONC:-GLIMPSE2Concordance}"
@@ -199,6 +205,29 @@ ensure_concordance_bin() {
   CONCORDANCE_BIN="${gcs}"
 }
 
+# Build a pip wheelhouse (cp<SUMMARIZE_PY_VER> manylinux) for the Summarize deps on this VM and stage
+# it to the bucket; set SUMMARIZE_WHEELHOUSE to the gs:// tarball so the WDL installs offline.
+ensure_summarize_wheelhouse() {
+  if [[ "${SUMMARIZE_WHEELHOUSE}" == gs://* ]]; then
+    gs_exists "${SUMMARIZE_WHEELHOUSE}" || { echo "ERROR: SUMMARIZE_WHEELHOUSE not found: ${SUMMARIZE_WHEELHOUSE}"; exit 1; }
+    echo ">> summarize wheelhouse (user gs://): ${SUMMARIZE_WHEELHOUSE}"; return
+  fi
+  local gcs="${EVAL_WORK}/bin/summarize_wheelhouse.tar.gz"
+  if gs_exists "${gcs}"; then echo ">> summarize wheelhouse already staged: ${gcs}"; SUMMARIZE_WHEELHOUSE="${gcs}"; return; fi
+  local whd="${LOCAL}/summ_wheelhouse"; rm -rf "${whd}"; mkdir -p "${whd}"
+  echo ">> building summarize wheelhouse (cp${SUMMARIZE_PY_VER} manylinux): ${SUMMARIZE_PY_PKGS}"
+  python3 -m pip download --only-binary=:all: \
+      --python-version "${SUMMARIZE_PY_VER}" --implementation cp --abi "cp${SUMMARIZE_PY_VER}" \
+      --platform manylinux_2_17_x86_64 --platform manylinux2014_x86_64 \
+      -d "${whd}" ${SUMMARIZE_PY_PKGS} \
+    || { echo "ERROR: pip download failed (PyPI egress?). Supply SUMMARIZE_WHEELHOUSE=gs://<bucket>/summarize_wheelhouse.tar.gz (built on a PyPI-reachable machine), or ENABLE_SUMMARIZE=false."; exit 1; }
+  local tarball="${LOCAL}/summarize_wheelhouse.tar.gz"
+  tar -czf "${tarball}" -C "${whd}" .
+  echo ">> staging summarize wheelhouse ($(du -h "${tarball}" | cut -f1), $(ls "${whd}" | wc -l) wheels) -> ${gcs}"
+  gsutil cp "${tarball}" "${gcs}"
+  SUMMARIZE_WHEELHOUSE="${gcs}"
+}
+
 # ============================ resolve imputed output =========================
 if [ -z "${IMPUTED_VCF}" ]; then
   ROOT="${BUCKET}/${HOLDOUT_OUTPUT_PATH}"
@@ -294,6 +323,7 @@ fi
 
 # ============================ Step D: Summarize ==============================
 if [ "${ENABLE_SUMMARIZE}" = "true" ]; then
+  ensure_summarize_wheelhouse
   if [ -n "${POP_TSV}" ]; then
     gs_exists "${POP_TSV}" || { echo "ERROR: POP_TSV not found: ${POP_TSV}"; exit 1; }
   fi
@@ -356,6 +386,7 @@ if [ "${ENABLE_SUMMARIZE}" = "true" ]; then
 
   S_IN="panel_vcf=${PANEL_SUMM_VCF},panel_vcf_idx=${PANEL_SUMM_IDX}"
   S_IN="${S_IN},imputed_vcf=${IMPUTED_VCF},imputed_vcf_idx=${IMPUTED_IDX}"
+  S_IN="${S_IN},summarize_wheelhouse=${SUMMARIZE_WHEELHOUSE}"
   S_IN="${S_IN},population_tsv=${POP_TSV},output_prefix=${OUT_PREFIX}"
   run_wf "${WF_SUMM}" "glimpse2-summarize-holdout198${EVAL_PATHTAG}" "${S_IN}"
 fi

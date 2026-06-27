@@ -19,6 +19,7 @@ workflow GLIMPSE2Summarize {
         File imputed_vcf_idx
         File population_tsv         # should contain columns: Sample name, Population code (e.g., igsr_samples.tsv tables generated from https://www.internationalgenome.org/data/)
         String output_prefix
+        File? summarize_wheelhouse  # pre-staged pip wheelhouse (cp311 manylinux); perimeter blocks the conda/PyPI install
     }
 
     call SummarizeAndPlot { input:
@@ -27,6 +28,7 @@ workflow GLIMPSE2Summarize {
         imputed_vcf = imputed_vcf,
         imputed_vcf_idx = imputed_vcf_idx,
         population_tsv = population_tsv,
+        summarize_wheelhouse = summarize_wheelhouse,
         output_prefix = output_prefix
     }
 
@@ -44,7 +46,8 @@ task SummarizeAndPlot {
         File imputed_vcf_idx
         File population_tsv
         String output_prefix
-        
+        File? summarize_wheelhouse
+
         RuntimeAttr? runtime_attr_override
     }
 
@@ -53,8 +56,17 @@ task SummarizeAndPlot {
     command <<<
         set -euxo pipefail
         
-        # Install dependencies for variant streaming, stats, and plotting
-        conda install -y -c bioconda -c conda-forge cyvcf2 pandas numpy matplotlib seaborn scipy
+        export MPLBACKEND=Agg     # headless matplotlib
+
+        # Install deps for variant streaming, stats, and plotting. The perimeter blocks anaconda/PyPI
+        # from the task, so install OFFLINE from a pre-staged pip wheelhouse (cp311 manylinux) if one
+        # is provided; otherwise fall back to an online pip install.
+        if [ -n "~{summarize_wheelhouse}" ]; then
+            mkdir -p wheelhouse && tar -xzf ~{summarize_wheelhouse} -C wheelhouse
+            pip install --no-index --find-links=wheelhouse cyvcf2 pandas numpy matplotlib seaborn scipy
+        else
+            pip install cyvcf2 pandas numpy matplotlib seaborn scipy
+        fi
 
         python - ~{panel_vcf} \
                  ~{imputed_vcf} \
@@ -432,7 +444,7 @@ task SummarizeAndPlot {
         disk_type:          "SSD",
         preemptible_tries:  1,
         max_retries:        0,
-        docker:             "continuumio/miniconda3:latest"
+        docker:             "python:3.11-slim"     # pinned cp311 -> matches the staged manylinux wheelhouse
     }
     RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
     runtime {
