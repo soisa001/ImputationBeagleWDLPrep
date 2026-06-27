@@ -39,10 +39,16 @@ OUT_BASE="${OUT_BASE:-aou_holdout198_${REGION}}"
 USER_PROJECT="${USER_PROJECT:-${AOU_USER_PROJECT:-}}"   # billing project for requester-pays panel reads
 
 # Panels (same templates/defaults as prep_imputebeagle_holdout198.sh / prep_eval_holdout198.sh).
-POPPED_PANEL_TMPL="${FULL_POPPED_SRC_TMPL:-gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_popped_vcf/aou_lr_phase2_v1.{contig}.popped.bcf}"
-IDSPLIT_PANEL_TMPL="${ID_SPLIT_TMPL:-gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_id_split_vcf_gz/aou_lr_phase2_v1.{contig}.id.split.vcf.gz}"
-BUBBLE_LEAVEOUT_TMPL="${SITES_ONLY_TMPL:-gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_bubble_split_sites_only_leaveout_vcf/aou_lr_phase2_v1.{contig}.bubble.split.sites.leaveout.bcf}"
-BUBBLE_FULL_TMPL="${FULL_SRC_TMPL:-gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_bubble_split_vcf/aou_lr_phase2_v1.{contig}.bubble.split.bcf}"
+# NOTE: assign brace-containing defaults via a separate single-quoted statement -- a bare '}' inside a
+# ${VAR:-default} default value prematurely closes the expansion and mangles the {contig} placeholder.
+POPPED_PANEL_TMPL="${FULL_POPPED_SRC_TMPL:-}"
+[ -n "${POPPED_PANEL_TMPL}" ] || POPPED_PANEL_TMPL='gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_popped_vcf/aou_lr_phase2_v1.{contig}.popped.bcf'
+IDSPLIT_PANEL_TMPL="${ID_SPLIT_TMPL:-}"
+[ -n "${IDSPLIT_PANEL_TMPL}" ] || IDSPLIT_PANEL_TMPL='gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_id_split_vcf_gz/aou_lr_phase2_v1.{contig}.id.split.vcf.gz'
+BUBBLE_LEAVEOUT_TMPL="${SITES_ONLY_TMPL:-}"
+[ -n "${BUBBLE_LEAVEOUT_TMPL}" ] || BUBBLE_LEAVEOUT_TMPL='gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_bubble_split_sites_only_leaveout_vcf/aou_lr_phase2_v1.{contig}.bubble.split.sites.leaveout.bcf'
+BUBBLE_FULL_TMPL="${FULL_SRC_TMPL:-}"
+[ -n "${BUBBLE_FULL_TMPL}" ] || BUBBLE_FULL_TMPL='gs://rw-long-reads-transfer-2026-06-17/v9/lrWGS/panel/panel/panel_bubble_split_vcf/aou_lr_phase2_v1.{contig}.bubble.split.bcf'
 
 POPPED_PANEL="${POPPED_PANEL_TMPL//\{contig\}/${REGION}}"
 IDSPLIT_PANEL="${IDSPLIT_PANEL_TMPL//\{contig\}/${REGION}}"
