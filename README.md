@@ -29,6 +29,10 @@ glimpse2_eval_wdl/                  # eval workflows (single-file each)
     GLIMPSE2Concordance.wdl
     GLIMPSE2Summarize.wdl
 
+vcfdist_eval_wdl/                   # vcfdist phasing + precision/recall eval (single-file)
+    VcfdistEvaluation.wdl
+prep_vcfdist_holdout198.sh          # STEP 4: register + run vcfdist per-sample vs the 198 truth
+
 pop_glimpse2_rust/                  # pop engine source (build once -> static musl binary)
     pop-glimpse2.rs
     Cargo.toml
@@ -173,6 +177,21 @@ pre-build (e.g. to build once before launching); the prep does the same automati
   "VCFs are out of sync"; the merge-join pairs records by exact allele within each position, skips and
   reports panel-only / imputed-only sites, and is order-independent and memory-bounded. The eval's
   site-matched panel no longer needs an exact record-count match with the imputed output.
+- **vcfdist phasing eval** (`vcfdist_eval_wdl/VcfdistEvaluation.wdl`, launched by
+  `prep_vcfdist_holdout198.sh`) scores the imputation per-sample against the 198's full-panel truth with
+  [vcfdist](https://github.com/TimD1/vcfdist), which is **representation-aware** (it aligns query vs
+  truth), so it reports **phasing** accuracy (switch / flip errors, phase blocks) alongside
+  precision/recall — no allele-rep matching needed, and either the popped or un-popped output works as
+  the eval VCF (default: un-popped, the direct phased Beagle haplotypes; `POPPED=true` for the popped
+  output). Adapted from the Broad starter for this pipeline: a single multi-sample truth VCF instead of
+  a per-sample array (the 198 share one truth), and every workflow input is a scalar or a
+  newline-delimited file (`read_lines`) so the proven `wb` batch-input mechanism applies. The
+  `SummarizeEvaluations` task installs pandas offline from a staged wheelhouse (perimeter blocks PyPI)
+  and aggregates `phasing-summary.tsv` (all numeric columns) + switch/flip event and phase-block counts
+  into `evaluation_summary.tsv`. Run: `bash prep_vcfdist_holdout198.sh` (set `MAX_SAMPLES=5` for a cheap
+  test; `REF_FASTA=` to override the default public GRCh38; `CONF_BED=` for confident-region restriction;
+  `FORCE_WF_REGISTER=true` after editing the WDL). vcfdist localizes the reference FASTA per sample, so a
+  chr1-subset reference cuts cost on the 198-way scatter.
 - `debug_check_outputs.sh` validates the imputation outputs end-to-end: that the popped output is truly
   popped (biallelic atomic, single-token `INFO/ID`, `FORMAT=GT:DS:GP`, `DS == gp1+2*gp2`); that each
   popped allele is **minimal/parsimonious** (no trimmable flanking bases -> bubbles really collapsed to
