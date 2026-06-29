@@ -61,12 +61,16 @@ task SummarizeAndPlot {
         # Install deps for variant streaming, stats, and plotting. The perimeter blocks anaconda/PyPI
         # from the task, so install OFFLINE from a pre-staged pip wheelhouse (cp311 manylinux) if one
         # is provided; otherwise fall back to an online pip install.
+        # matplotlib pinned <3.10: seaborn 0.13.2's boxplot legend (_configure_legend) raises
+        # "UnboundLocalError: boxprops" with matplotlib >=3.11. Pinning here (not just in the wheelhouse
+        # build) means a stale/mixed wheelhouse fails LOUDLY at install instead of silently grabbing 3.11.
         if [ -n "~{summarize_wheelhouse}" ]; then
             mkdir -p wheelhouse && tar -xzf ~{summarize_wheelhouse} -C wheelhouse
-            pip install --no-index --find-links=wheelhouse cyvcf2 pandas numpy matplotlib seaborn scipy
+            pip install --no-index --find-links=wheelhouse cyvcf2 pandas numpy 'matplotlib<3.10' seaborn scipy
         else
-            pip install cyvcf2 pandas numpy matplotlib seaborn scipy
+            pip install cyvcf2 pandas numpy 'matplotlib<3.10' seaborn scipy
         fi
+        python -c 'import matplotlib; assert tuple(map(int, matplotlib.__version__.split(".")[:2])) < (3,10), "matplotlib "+matplotlib.__version__+" breaks seaborn 0.13.2 boxplot; rebuild the wheelhouse (pull the matplotlib<3.10 fix)"'
 
         python - ~{panel_vcf} \
                  ~{imputed_vcf} \
