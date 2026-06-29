@@ -102,7 +102,9 @@ PANEL_SUMM_IDX="${PANEL_SUMM_IDX:-${PANEL_SUMM_VCF}.tbi}"
 # built here (this VM has egress) and passed to the task for an offline `pip install`. Must match the
 # task's python (python:3.11-slim -> cp311 manylinux).
 SUMMARIZE_WHEELHOUSE="${SUMMARIZE_WHEELHOUSE:-}"   # gs:// to a prebuilt wheelhouse.tar.gz (skips the build)
-SUMMARIZE_PY_PKGS="${SUMMARIZE_PY_PKGS:-cyvcf2 pandas numpy matplotlib seaborn scipy}"
+# matplotlib pinned <3.10: seaborn 0.13.2's boxplot legend (_configure_legend) hits an
+# UnboundLocalError 'boxprops' with matplotlib >=3.11 (changed boxplot artist API). 3.9.x is compatible.
+SUMMARIZE_PY_PKGS="${SUMMARIZE_PY_PKGS:-cyvcf2 pandas numpy matplotlib<3.10 seaborn scipy}"
 SUMMARIZE_PY_VER="${SUMMARIZE_PY_VER:-311}"
 
 # ---- registration ----
@@ -212,7 +214,10 @@ ensure_summarize_wheelhouse() {
     gs_exists "${SUMMARIZE_WHEELHOUSE}" || { echo "ERROR: SUMMARIZE_WHEELHOUSE not found: ${SUMMARIZE_WHEELHOUSE}"; exit 1; }
     echo ">> summarize wheelhouse (user gs://): ${SUMMARIZE_WHEELHOUSE}"; return
   fi
-  local gcs="${EVAL_WORK}/bin/summarize_wheelhouse.tar.gz"
+  # content-address the staged wheelhouse by the package set + python ver, so changing the pins
+  # (e.g. matplotlib<3.10) builds a fresh tarball instead of silently reusing a stale one.
+  local tag; tag="$(printf '%s' "${SUMMARIZE_PY_PKGS} cp${SUMMARIZE_PY_VER}" | cksum | cut -d' ' -f1)"
+  local gcs="${EVAL_WORK}/bin/summarize_wheelhouse.${tag}.tar.gz"
   if gs_exists "${gcs}"; then echo ">> summarize wheelhouse already staged: ${gcs}"; SUMMARIZE_WHEELHOUSE="${gcs}"; return; fi
   local whd="${LOCAL}/summ_wheelhouse"; rm -rf "${whd}"; mkdir -p "${whd}"
   echo ">> building summarize wheelhouse (cp${SUMMARIZE_PY_VER} manylinux): ${SUMMARIZE_PY_PKGS}"

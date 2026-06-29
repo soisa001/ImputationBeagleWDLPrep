@@ -168,7 +168,10 @@ pre-build (e.g. to build once before launching); the prep does the same automati
   scipy`, so the eval prep builds a pip wheelhouse (cp311 manylinux) on the notebook VM, stages it to
   the bucket, and passes it as the `summarize_wheelhouse` input; the task installs offline with
   `pip install --no-index --find-links` (docker pinned to `python:3.11-slim` to match the cp311 wheels,
-  `MPLBACKEND=Agg` for headless plotting). Override with `SUMMARIZE_WHEELHOUSE=gs://...` to supply a
+  `MPLBACKEND=Agg` for headless plotting; matplotlib pinned `<3.10` because seaborn 0.13.2's boxplot
+  legend breaks on matplotlib >=3.11). The staged wheelhouse path is content-addressed by the package
+  set, so changing the pins rebuilds it instead of reusing a stale tarball. Override with
+  `SUMMARIZE_WHEELHOUSE=gs://...` to supply a
   prebuilt wheelhouse (e.g. if this VM lacks PyPI egress). As with Concordance, re-run the eval with
   `FORCE_WF_REGISTER=true` once after updating the WDL.
 - GLIMPSE2Summarize streams the panel and imputed VCFs with a **(CHROM,POS,REF,ALT) merge-join** rather

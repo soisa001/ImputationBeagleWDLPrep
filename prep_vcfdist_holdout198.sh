@@ -190,7 +190,8 @@ ensure_pip_wheelhouse() {
     gs_exists "${PIP_WHEELHOUSE}" || { echo "ERROR: PIP_WHEELHOUSE not found: ${PIP_WHEELHOUSE}"; exit 1; }
     echo ">> pip wheelhouse (user gs://): ${PIP_WHEELHOUSE}"; return
   fi
-  local gcs="${VCFDIST_WORK}/bin/pandas_wheelhouse.tar.gz"
+  local tag; tag="$(printf '%s' "${PIP_PKGS} cp${PIP_PY_VER}" | cksum | cut -d' ' -f1)"
+  local gcs="${VCFDIST_WORK}/bin/pandas_wheelhouse.${tag}.tar.gz"
   if gs_exists "${gcs}"; then echo ">> pip wheelhouse already staged: ${gcs}"; PIP_WHEELHOUSE="${gcs}"; return; fi
   local whd="${LOCAL}/vcfdist_wheelhouse"; rm -rf "${whd}"; mkdir -p "${whd}"
   echo ">> building pip wheelhouse (cp${PIP_PY_VER} manylinux): ${PIP_PKGS}"
