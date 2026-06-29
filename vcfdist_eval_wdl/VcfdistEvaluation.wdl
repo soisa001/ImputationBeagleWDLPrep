@@ -59,7 +59,10 @@ workflow VcfdistEvaluation {
 
         File vcfdist_bed_list               # analysis/stratification BEDs (gs:// or local), one per line
         File labels_list                    # label per stratification, parallel to vcfdist_bed_list
-        String? vcfdist_extra_args
+        # NOT String? : Cromwell makes each scatter body a sub-workflow, for which a referenced
+        # optional-without-default String becomes a *required* sub-workflow input and fails to look up
+        # when omitted. A defaulted String is always defined, so it propagates into the scatter cleanly.
+        String vcfdist_extra_args = ""
 
         File? pip_wheelhouse                 # pandas wheelhouse for SummarizeEvaluations (offline pip)
     }
@@ -198,7 +201,7 @@ task Vcfdist {
         File truth_vcf
         File bed_file
         File reference_fasta
-        String? extra_args
+        String extra_args = ""       # defaulted (not String?) so the scatter sub-workflow always resolves it
         Int verbosity = 1
 
         RuntimeAttr? runtime_attr_override
