@@ -318,10 +318,12 @@ PY
 if [ "${ENABLE_CONCORDANCE}" = "true" ]; then
   ensure_trh_bed
   ensure_concordance_bin
+  ensure_summarize_wheelhouse          # cyvcf2+numpy for ExactGenotypeMetrics (same wheelhouse as Summarize)
   C_IN="panel_vcf=${PANEL_FULL},panel_vcf_idx=${PANEL_FULL_IDX}"
   C_IN="${C_IN},imputed_vcf=${IMPUTED_VCF},imputed_vcf_idx=${IMPUTED_IDX}"
   C_IN="${C_IN},trh_bed=${TRH_BED},trh_bed_idx=${TRH_BED_IDX}"
   C_IN="${C_IN},concordance_binary=${CONCORDANCE_BIN}"
+  C_IN="${C_IN},metrics_wheelhouse=${SUMMARIZE_WHEELHOUSE}"
   C_IN="${C_IN},region=${REGION},output_prefix=${OUT_PREFIX}"
   run_wf "${WF_CONC}" "glimpse2-concordance-holdout198${EVAL_PATHTAG}" "${C_IN}"
 fi

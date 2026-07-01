@@ -11,6 +11,7 @@ workflow GLIMPSE2Concordance {
         String region
         String output_prefix
         File? concordance_binary   # pre-staged GLIMPSE2_concordance_static (perimeter blocks the github wget)
+        File? metrics_wheelhouse   # cyvcf2+numpy wheelhouse for ExactGenotypeMetrics (perimeter blocks PyPI)
     }
 
     Array[String] trh_bins = ["outTRH", "inTRH"]
@@ -55,9 +56,22 @@ workflow GLIMPSE2Concordance {
         imputed_name = basename(imputed_vcf)
     }
 
+    # EXACT per-sample precision/recall/F1 from the full 3x3 genotype confusion matrix, by streaming
+    # truth (panel) vs imputed directly (the error.spl-derived per_sample_metrics can only give an
+    # UPPER bound on precision because GLIMPSE groups mismatches by truth class, hiding het<->hom-alt swaps).
+    call ExactGenotypeMetrics { input:
+        panel_vcf = panel_vcf,
+        panel_vcf_idx = panel_vcf_idx,
+        annotated_imputed_vcf = AnnotateImputed.annotated_vcf,       # has GT:DS:GP + INFO/TRH
+        annotated_imputed_vcf_idx = AnnotateImputed.annotated_vcf_idx,
+        output_prefix = output_prefix,
+        metrics_wheelhouse = metrics_wheelhouse
+    }
+
     output {
         Array[File] concordance_plots = [PlotResults.r2_plot_inTRH, PlotResults.r2_plot_outTRH, PlotResults.nrd_plot_inTRH, PlotResults.nrd_plot_outTRH, PlotResults.recall_fpr_plot_inTRH, PlotResults.recall_fpr_plot_outTRH]
         File per_sample_metrics_tsv = PlotResults.per_sample_metrics_tsv
+        File exact_per_sample_metrics_tsv = ExactGenotypeMetrics.exact_per_sample_metrics_tsv
         Array[Array[File]] concordance_results = [all_rsquare_grp_files, all_rsquare_spl_files, all_error_grp_files, all_error_spl_files, all_error_cal_files]
     }
 }
@@ -480,6 +494,198 @@ task PlotResults {
         preemptible_tries:  2,
         max_retries:        1,
         docker:             "jupyter/scipy-notebook:latest"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
+    runtime {
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " " + select_first([runtime_attr.disk_type, default_attr.disk_type])
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
+    }
+}
+
+task ExactGenotypeMetrics {
+    input {
+        File panel_vcf                    # truth (full panel, multi-sample), biallelic
+        File panel_vcf_idx
+        File annotated_imputed_vcf        # imputed + INFO/TRH (GT:DS:GP), biallelic
+        File annotated_imputed_vcf_idx
+        String output_prefix
+        File? metrics_wheelhouse          # cyvcf2 + numpy wheelhouse (offline; perimeter blocks PyPI)
+
+        RuntimeAttr? runtime_attr_override
+    }
+
+    Int disk_gb = 20 + 3 * ceil(size(panel_vcf, "GiB") + size(annotated_imputed_vcf, "GiB"))
+
+    command <<<
+        set -euxo pipefail
+
+        # cyvcf2 (bundles htslib) + numpy, offline from the staged wheelhouse if provided.
+        if [ -n "~{metrics_wheelhouse}" ]; then
+            mkdir -p wheelhouse && tar -xzf ~{metrics_wheelhouse} -C wheelhouse
+            pip install --no-index --find-links=wheelhouse cyvcf2 numpy
+        else
+            pip install cyvcf2 numpy
+        fi
+
+        cat << 'EOF' > exact_metrics.py
+        import sys, time
+        import numpy as np
+        import cyvcf2
+
+        panel_path, imputed_path, out_prefix = sys.argv[1], sys.argv[2], sys.argv[3]
+
+        GP_THRESH = [0.0, 0.9]
+        LEN_NAMES = ['SV_DEL', 'DEL', 'SNP', 'INS', 'SV_INS']
+        TRH_NAMES = ['outTRH', 'inTRH']
+        CLS_LUT = np.array([0, 1, -1, 2], dtype=np.int64)   # cyvcf2 gt_types 0,1,2,3 -> RR,RA,missing,AA
+
+        imp = cyvcf2.VCF(imputed_path)
+        imp_samples = list(imp.samples)
+        n = len(imp_samples)
+        imp_index = {s: i for i, s in enumerate(imp_samples)}
+
+        # subset the (huge) panel to the imputed samples at the htslib level -> only those GTs decoded
+        panel = cyvcf2.VCF(panel_path, samples=imp_samples)
+        panel_samples = list(panel.samples)                 # subset, in panel's file order
+        psamp = np.array([imp_index[s] for s in panel_samples], dtype=np.int64)  # panel col -> canonical (imputed) idx
+        sys.stderr.write(f"samples: imputed={n}, panel-matched={len(panel_samples)}\n"); sys.stderr.flush()
+        if len(panel_samples) == 0:
+            sys.exit("ERROR: no overlapping samples between imputed and panel")
+
+        # M[sample, trh(2), length(5), gp(2), truth(3), call(3)]
+        M = np.zeros((n, 2, 5, 2, 3, 3), dtype=np.int64)
+
+        def length_idx(ref, alt):
+            d = len(alt) - len(ref)                          # replicate FilterAndConcordance's LEN_EXP
+            if d <= -50: return 0                            # SV_DEL
+            if -50 < d <= -1: return 1                       # DEL
+            if len(ref) == 1 and len(alt) == 1: return 2     # SNP
+            if len(ref) != 1 and 0 <= d < 50: return 3       # INS
+            if d >= 50: return 4                             # SV_INS
+            return -1
+
+        def pos_blocks(vcf):
+            block, key = [], None
+            for v in vcf:
+                k = (v.CHROM, v.POS)
+                if key is not None and k != key:
+                    yield key, block; block = []
+                block.append(v); key = k
+            if block: yield key, block
+
+        def akey(v):
+            return (v.REF, v.ALT[0] if v.ALT else '.')
+
+        try:
+            chrom_rank = {c: i for i, c in enumerate(imp.seqnames)}
+        except Exception:
+            chrom_rank = {}
+        def order(k):
+            return (chrom_rank.get(k[0], 1 << 30), k[1])
+
+        pit, cit = pos_blocks(panel), pos_blocks(imp)
+        pb, cb = next(pit, None), next(cit, None)
+        matched, t0 = 0, time.time()
+        while pb is not None and cb is not None:
+            pk, pblk = pb; ck, cblk = cb
+            if pk == ck:
+                pmap = {}
+                for v in pblk: pmap.setdefault(akey(v), v)
+                for cv in cblk:
+                    pv = pmap.get(akey(cv))
+                    if pv is None: continue
+                    li = length_idx(cv.REF, cv.ALT[0] if cv.ALT else '')
+                    if li < 0: continue
+                    trh = cv.INFO.get('TRH')
+                    ti = 1 if (trh is not None and int(trh) == 1) else 0
+
+                    truth_canon = np.full(n, 2, dtype=np.int64)   # default UNKNOWN -> excluded
+                    truth_canon[psamp] = pv.gt_types              # panel GTs mapped to canonical order
+                    t_cls = CLS_LUT[truth_canon]
+                    q_cls = CLS_LUT[cv.gt_types]                  # imputed already canonical
+                    gp = cv.format('GP')
+                    maxgp = gp.max(axis=1) if gp is not None else np.ones(n, dtype=np.float32)
+
+                    vi = np.where((t_cls >= 0) & (q_cls >= 0))[0]
+                    if vi.size:
+                        M[:, ti, li, 0] += np.bincount(vi * 9 + t_cls[vi] * 3 + q_cls[vi],
+                                                       minlength=n * 9).reshape(n, 3, 3)
+                        vf = vi[maxgp[vi] >= 0.9]
+                        if vf.size:
+                            M[:, ti, li, 1] += np.bincount(vf * 9 + t_cls[vf] * 3 + q_cls[vf],
+                                                           minlength=n * 9).reshape(n, 3, 3)
+                    matched += 1
+                    if matched % 200000 == 0:
+                        sys.stderr.write(f"  matched {matched:,} sites ... {int(time.time()-t0)}s\n"); sys.stderr.flush()
+                pb, cb = next(pit, None), next(cit, None)
+            elif order(pk) < order(ck):
+                pb = next(pit, None)
+            else:
+                cb = next(cit, None)
+        sys.stderr.write(f"done: {matched:,} matched sites in {int(time.time()-t0)}s\n")
+
+        def safe(a, b):
+            return a / b if b > 0 else float('nan')
+
+        hdr = ['TRH_BIN', 'LENGTH_BIN', 'MIN_TAR_GP', 'sample_name',
+               'n_RR_RR', 'n_RR_RA', 'n_RR_AA', 'n_RA_RR', 'n_RA_RA', 'n_RA_AA', 'n_AA_RR', 'n_AA_RA', 'n_AA_AA',
+               'TP_carrier', 'FP', 'FN_carrier', 'TN', 'precision', 'recall', 'F1',
+               'TP_exact', 'precision_exact', 'recall_exact', 'F1_exact', 'overall_gt_conc', 'nonref_conc']
+        import csv
+        with open(f'{out_prefix}.exact_per_sample_metrics.tsv', 'w', newline='') as fh:
+            w = csv.writer(fh, delimiter='\t'); w.writerow(hdr)
+            for s in range(n):
+                for ti, tname in enumerate(TRH_NAMES):
+                    for li, lname in enumerate(LEN_NAMES):
+                        for gi, g in enumerate(GP_THRESH):
+                            m = M[s, ti, li, gi]
+                            n00, n01, n02 = int(m[0, 0]), int(m[0, 1]), int(m[0, 2])
+                            n10, n11, n12 = int(m[1, 0]), int(m[1, 1]), int(m[1, 2])
+                            n20, n21, n22 = int(m[2, 0]), int(m[2, 1]), int(m[2, 2])
+                            tot = n00 + n01 + n02 + n10 + n11 + n12 + n20 + n21 + n22
+                            truth_nonref = n10 + n11 + n12 + n20 + n21 + n22
+                            called_nonref = n01 + n11 + n21 + n02 + n12 + n22
+                            # carrier level (a het<->hom-alt swap still detects the carrier -> TP)
+                            TPc = n11 + n12 + n21 + n22
+                            FPc = n01 + n02
+                            FNc = n10 + n20
+                            TN = n00
+                            prec_c, rec_c = safe(TPc, TPc + FPc), safe(TPc, TPc + FNc)
+                            f1_c = safe(2 * TPc, 2 * TPc + FPc + FNc)
+                            # genotype-exact (a swap is both a wrong call and a missed correct call)
+                            TPg = n11 + n22
+                            prec_g, rec_g = safe(TPg, called_nonref), safe(TPg, truth_nonref)
+                            f1_g = safe(2 * TPg, called_nonref + truth_nonref)
+                            w.writerow([tname, lname, g, imp_samples[s],
+                                        n00, n01, n02, n10, n11, n12, n20, n21, n22,
+                                        TPc, FPc, FNc, TN, prec_c, rec_c, f1_c,
+                                        TPg, prec_g, rec_g, f1_g,
+                                        safe(n00 + n11 + n22, tot), safe(n11 + n22, tot - n00)])
+        sys.stderr.write("wrote exact_per_sample_metrics.tsv\n")
+        EOF
+
+        python exact_metrics.py ~{panel_vcf} ~{annotated_imputed_vcf} ~{output_prefix}
+    >>>
+
+    output {
+        File exact_per_sample_metrics_tsv = "~{output_prefix}.exact_per_sample_metrics.tsv"
+    }
+
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          2,
+        mem_gb:             16,
+        disk_gb:            disk_gb,
+        boot_disk_gb:       10,
+        disk_type:          "SSD",
+        preemptible_tries:  1,
+        max_retries:        1,
+        docker:             "python:3.11-slim"
     }
     RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
     runtime {
