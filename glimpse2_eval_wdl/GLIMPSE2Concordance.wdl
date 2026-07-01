@@ -636,37 +636,48 @@ task ExactGenotypeMetrics {
                'n_RR_RR', 'n_RR_RA', 'n_RR_AA', 'n_RA_RR', 'n_RA_RA', 'n_RA_AA', 'n_AA_RR', 'n_AA_RA', 'n_AA_AA',
                'TP_carrier', 'FP', 'FN_carrier', 'TN', 'precision', 'recall', 'F1',
                'TP_exact', 'precision_exact', 'recall_exact', 'F1_exact', 'overall_gt_conc', 'nonref_conc']
+
+        def row(tname, lname, g, sname, m):
+            # m is a 3x3 truth(RR,RA,AA) x call(RR,RA,AA) confusion matrix
+            n00, n01, n02 = int(m[0, 0]), int(m[0, 1]), int(m[0, 2])
+            n10, n11, n12 = int(m[1, 0]), int(m[1, 1]), int(m[1, 2])
+            n20, n21, n22 = int(m[2, 0]), int(m[2, 1]), int(m[2, 2])
+            tot = n00 + n01 + n02 + n10 + n11 + n12 + n20 + n21 + n22
+            truth_nonref = n10 + n11 + n12 + n20 + n21 + n22
+            called_nonref = n01 + n11 + n21 + n02 + n12 + n22
+            # carrier level (a het<->hom-alt swap still detects the carrier -> TP)
+            TPc = n11 + n12 + n21 + n22
+            FPc = n01 + n02
+            FNc = n10 + n20
+            TN = n00
+            prec_c, rec_c = safe(TPc, TPc + FPc), safe(TPc, TPc + FNc)
+            f1_c = safe(2 * TPc, 2 * TPc + FPc + FNc)
+            # genotype-exact (a swap is both a wrong call and a missed correct call)
+            TPg = n11 + n22
+            prec_g, rec_g = safe(TPg, called_nonref), safe(TPg, truth_nonref)
+            f1_g = safe(2 * TPg, called_nonref + truth_nonref)
+            return [tname, lname, g, sname,
+                    n00, n01, n02, n10, n11, n12, n20, n21, n22,
+                    TPc, FPc, FNc, TN, prec_c, rec_c, f1_c,
+                    TPg, prec_g, rec_g, f1_g,
+                    safe(n00 + n11 + n22, tot), safe(n11 + n22, tot - n00)]
+
         import csv
         with open(f'{out_prefix}.exact_per_sample_metrics.tsv', 'w', newline='') as fh:
             w = csv.writer(fh, delimiter='\t'); w.writerow(hdr)
+            # top-line: micro-average over all samples (pool confusion counts, then compute rates).
+            # sample_name='ALL' rows come first so the aggregate is easy to grep out.
+            Msum = M.sum(axis=0)   # [trh, length, gp, 3, 3]
+            for ti, tname in enumerate(TRH_NAMES):
+                for li, lname in enumerate(LEN_NAMES):
+                    for gi, g in enumerate(GP_THRESH):
+                        w.writerow(row(tname, lname, g, 'ALL', Msum[ti, li, gi]))
             for s in range(n):
                 for ti, tname in enumerate(TRH_NAMES):
                     for li, lname in enumerate(LEN_NAMES):
                         for gi, g in enumerate(GP_THRESH):
-                            m = M[s, ti, li, gi]
-                            n00, n01, n02 = int(m[0, 0]), int(m[0, 1]), int(m[0, 2])
-                            n10, n11, n12 = int(m[1, 0]), int(m[1, 1]), int(m[1, 2])
-                            n20, n21, n22 = int(m[2, 0]), int(m[2, 1]), int(m[2, 2])
-                            tot = n00 + n01 + n02 + n10 + n11 + n12 + n20 + n21 + n22
-                            truth_nonref = n10 + n11 + n12 + n20 + n21 + n22
-                            called_nonref = n01 + n11 + n21 + n02 + n12 + n22
-                            # carrier level (a het<->hom-alt swap still detects the carrier -> TP)
-                            TPc = n11 + n12 + n21 + n22
-                            FPc = n01 + n02
-                            FNc = n10 + n20
-                            TN = n00
-                            prec_c, rec_c = safe(TPc, TPc + FPc), safe(TPc, TPc + FNc)
-                            f1_c = safe(2 * TPc, 2 * TPc + FPc + FNc)
-                            # genotype-exact (a swap is both a wrong call and a missed correct call)
-                            TPg = n11 + n22
-                            prec_g, rec_g = safe(TPg, called_nonref), safe(TPg, truth_nonref)
-                            f1_g = safe(2 * TPg, called_nonref + truth_nonref)
-                            w.writerow([tname, lname, g, imp_samples[s],
-                                        n00, n01, n02, n10, n11, n12, n20, n21, n22,
-                                        TPc, FPc, FNc, TN, prec_c, rec_c, f1_c,
-                                        TPg, prec_g, rec_g, f1_g,
-                                        safe(n00 + n11 + n22, tot), safe(n11 + n22, tot - n00)])
-        sys.stderr.write("wrote exact_per_sample_metrics.tsv\n")
+                            w.writerow(row(tname, lname, g, imp_samples[s], M[s, ti, li, gi]))
+        sys.stderr.write("wrote exact_per_sample_metrics.tsv (with sample_name='ALL' micro-average rows)\n")
         EOF
 
         python exact_metrics.py ~{panel_vcf} ~{annotated_imputed_vcf} ~{output_prefix}
