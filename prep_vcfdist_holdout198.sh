@@ -71,10 +71,11 @@ DO_NAIVELY_PHASE="${DO_NAIVELY_PHASE:-false}"     # convert / to | in the EVAL o
 MAX_SAMPLES="${MAX_SAMPLES:-0}"                   # 0 = all 198; set e.g. 5 for a cheap test run
 # vcfdist memory: 16 GB OOM-killed during wavefront clustering on the dense popped representation.
 # Bump RAM and, crucially, cap the supercluster size (-s) so a pathological dense region can't blow up
-# clustering memory/runtime (it also churned ~4h). --max-ram bounds the later precision/recall alignment.
-# vcfdist requires -s >= largest-variant(default 5000)+2. Override VCFDIST_EXTRA_ARGS to tune the tradeoff.
-VCFDIST_MEM_GB="${VCFDIST_MEM_GB:-40}"
-VCFDIST_EXTRA_ARGS="${VCFDIST_EXTRA_ARGS:--s 25000 --max-ram $((VCFDIST_MEM_GB - 8))}"
+# clustering memory/runtime (it also churned ~4h). vcfdist's --max-ram defaults to 64 GB, so at 64 GB
+# task RAM we don't set it. vcfdist requires -s >= largest-variant(default 5000)+2. Override
+# VCFDIST_EXTRA_ARGS / VCFDIST_MEM_GB to tune the tradeoff.
+VCFDIST_MEM_GB="${VCFDIST_MEM_GB:-64}"
+VCFDIST_EXTRA_ARGS="${VCFDIST_EXTRA_ARGS:--s 25000}"
 
 # ---- pandas wheelhouse for SummarizeEvaluations (perimeter blocks PyPI in-task) ----
 PIP_WHEELHOUSE="${PIP_WHEELHOUSE:-}"              # gs:// to a prebuilt wheelhouse.tar.gz (skips the build)

@@ -63,7 +63,7 @@ workflow VcfdistEvaluation {
         # optional-without-default String becomes a *required* sub-workflow input and fails to look up
         # when omitted. A defaulted String is always defined, so it propagates into the scatter cleanly.
         String vcfdist_extra_args = ""
-        Int vcfdist_mem_gb = 40              # vcfdist RAM per shard; 16 OOMs on the dense popped rep
+        Int vcfdist_mem_gb = 64              # vcfdist RAM per shard; 16 OOMs on the dense popped rep
 
         File? pip_wheelhouse                 # pandas wheelhouse for SummarizeEvaluations (offline pip)
     }
@@ -206,7 +206,7 @@ task Vcfdist {
         String extra_args = ""       # defaulted (not String?) so the scatter sub-workflow always resolves it
         Int verbosity = 1
         Int cpu = 1
-        Int mem_gb = 40              # 16 OOM-killed during wavefront clustering on the dense popped rep;
+        Int mem_gb = 64              # 16 OOM-killed during wavefront clustering on the dense popped rep;
                                      # pair with a supercluster cap (-s) in extra_args to bound it
 
         RuntimeAttr? runtime_attr_override
