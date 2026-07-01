@@ -68,8 +68,13 @@ VCFDIST_BEDS="${VCFDIST_BEDS:-}"
 VCFDIST_LABELS="${VCFDIST_LABELS:-}"
 
 DO_NAIVELY_PHASE="${DO_NAIVELY_PHASE:-false}"     # convert / to | in the EVAL only (Beagle output is already phased)
-VCFDIST_EXTRA_ARGS="${VCFDIST_EXTRA_ARGS:-}"
 MAX_SAMPLES="${MAX_SAMPLES:-0}"                   # 0 = all 198; set e.g. 5 for a cheap test run
+# vcfdist memory: 16 GB OOM-killed during wavefront clustering on the dense popped representation.
+# Bump RAM and, crucially, cap the supercluster size (-s) so a pathological dense region can't blow up
+# clustering memory/runtime (it also churned ~4h). --max-ram bounds the later precision/recall alignment.
+# vcfdist requires -s >= largest-variant(default 5000)+2. Override VCFDIST_EXTRA_ARGS to tune the tradeoff.
+VCFDIST_MEM_GB="${VCFDIST_MEM_GB:-32}"
+VCFDIST_EXTRA_ARGS="${VCFDIST_EXTRA_ARGS:--s 25000 --max-ram $((VCFDIST_MEM_GB - 8))}"
 
 # ---- pandas wheelhouse for SummarizeEvaluations (perimeter blocks PyPI in-task) ----
 PIP_WHEELHOUSE="${PIP_WHEELHOUSE:-}"              # gs:// to a prebuilt wheelhouse.tar.gz (skips the build)
@@ -274,6 +279,7 @@ IN="${IN},reference_fasta=${REF_FASTA},reference_fasta_fai=${REF_FAI}"
 IN="${IN},do_naively_phase=${DO_NAIVELY_PHASE}"
 IN="${IN},vcfdist_bed_list=${BEDLIST_GCS},labels_list=${LABELS_GCS}"
 [ -n "${VCFDIST_EXTRA_ARGS}" ] && IN="${IN},vcfdist_extra_args=${VCFDIST_EXTRA_ARGS}"
+IN="${IN},vcfdist_mem_gb=${VCFDIST_MEM_GB}"
 IN="${IN},pip_wheelhouse=${PIP_WHEELHOUSE}"
 
 run_wf "${WF_VCFDIST}" "vcfdist-holdout198${EVAL_PATHTAG}" "${IN}"

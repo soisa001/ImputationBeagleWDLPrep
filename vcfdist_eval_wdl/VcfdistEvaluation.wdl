@@ -63,6 +63,7 @@ workflow VcfdistEvaluation {
         # optional-without-default String becomes a *required* sub-workflow input and fails to look up
         # when omitted. A defaulted String is always defined, so it propagates into the scatter cleanly.
         String vcfdist_extra_args = ""
+        Int vcfdist_mem_gb = 32              # vcfdist RAM per shard; 16 OOMs on the dense popped rep
 
         File? pip_wheelhouse                 # pandas wheelhouse for SummarizeEvaluations (offline pip)
     }
@@ -104,7 +105,8 @@ workflow VcfdistEvaluation {
                 truth_vcf = SubsetSampleFromVcfTruth.single_sample_vcf[i],
                 bed_file = vcfdist_bed_files[j],
                 reference_fasta = reference_fasta,
-                extra_args = vcfdist_extra_args
+                extra_args = vcfdist_extra_args,
+                mem_gb = vcfdist_mem_gb
             }
         }
     }
@@ -203,6 +205,9 @@ task Vcfdist {
         File reference_fasta
         String extra_args = ""       # defaulted (not String?) so the scatter sub-workflow always resolves it
         Int verbosity = 1
+        Int cpu = 1
+        Int mem_gb = 32              # 16 OOM-killed during wavefront clustering on the dense popped rep;
+                                     # pair with a supercluster cap (-s) in extra_args to bound it
 
         RuntimeAttr? runtime_attr_override
     }
@@ -240,8 +245,8 @@ task Vcfdist {
 
     #########################
     RuntimeAttr default_attr = object {
-        cpu_cores:          1,
-        mem_gb:             16,
+        cpu_cores:          cpu,
+        mem_gb:             mem_gb,
         disk_gb:            disk_gb,
         boot_disk_gb:       10,
         disk_type:          "SSD",
