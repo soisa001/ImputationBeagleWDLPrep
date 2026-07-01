@@ -73,7 +73,7 @@ MAX_SAMPLES="${MAX_SAMPLES:-0}"                   # 0 = all 198; set e.g. 5 for 
 # Bump RAM and, crucially, cap the supercluster size (-s) so a pathological dense region can't blow up
 # clustering memory/runtime (it also churned ~4h). --max-ram bounds the later precision/recall alignment.
 # vcfdist requires -s >= largest-variant(default 5000)+2. Override VCFDIST_EXTRA_ARGS to tune the tradeoff.
-VCFDIST_MEM_GB="${VCFDIST_MEM_GB:-32}"
+VCFDIST_MEM_GB="${VCFDIST_MEM_GB:-40}"
 VCFDIST_EXTRA_ARGS="${VCFDIST_EXTRA_ARGS:--s 25000 --max-ram $((VCFDIST_MEM_GB - 8))}"
 
 # ---- pandas wheelhouse for SummarizeEvaluations (perimeter blocks PyPI in-task) ----
