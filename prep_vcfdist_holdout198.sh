@@ -69,12 +69,15 @@ VCFDIST_LABELS="${VCFDIST_LABELS:-}"
 
 DO_NAIVELY_PHASE="${DO_NAIVELY_PHASE:-false}"     # convert / to | in the EVAL only (Beagle output is already phased)
 MAX_SAMPLES="${MAX_SAMPLES:-5}"                   # test cap: 5 samples. Set MAX_SAMPLES=0 for all 198.
-# vcfdist memory: 16 GB OOM-killed during clustering on the dense popped rep. Bound it aggressively with
-# size-based clustering (--cluster size <min_gap>) + a tight supercluster cap (--max-supercluster-size)
-# so 16 GB is enough. vcfdist requires --max-supercluster-size >= largest-variant(default 5000)+2.
-# Override VCFDIST_EXTRA_ARGS / VCFDIST_MEM_GB to tune the tradeoff.
-VCFDIST_MEM_GB="${VCFDIST_MEM_GB:-16}"
-VCFDIST_EXTRA_ARGS="${VCFDIST_EXTRA_ARGS:---cluster size 100 --max-supercluster-size 10000}"
+# vcfdist memory has TWO independent knobs:
+#   1) clustering: cap supercluster size (--cluster size <min_gap> + --max-supercluster-size) so a dense
+#      popped region can't build a giant supercluster.
+#   2) precision/recall: vcfdist's --max-ram defaults to 64 GB, so the P/R phase parallelizes to fill
+#      ~64 GB (threads-per-tier = max-ram/tier). MUST set --max-ram <= the task RAM or it OOMs there
+#      regardless of clustering. We set it to VCFDIST_MEM_GB/2 to leave headroom for the base (reference
+#      FASTA + variants). Override VCFDIST_EXTRA_ARGS / VCFDIST_MEM_GB to tune the speed/RAM tradeoff.
+VCFDIST_MEM_GB="${VCFDIST_MEM_GB:-32}"
+VCFDIST_EXTRA_ARGS="${VCFDIST_EXTRA_ARGS:---cluster size 100 --max-supercluster-size 10000 --max-ram $((VCFDIST_MEM_GB / 2))}"
 
 # ---- pandas wheelhouse for SummarizeEvaluations (perimeter blocks PyPI in-task) ----
 PIP_WHEELHOUSE="${PIP_WHEELHOUSE:-}"              # gs:// to a prebuilt wheelhouse.tar.gz (skips the build)
