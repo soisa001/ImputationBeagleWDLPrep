@@ -382,21 +382,41 @@ task SummarizeAndPlot {
         target_results_df = make_results_df(target_samples, sample_stats['target'])
 
         def plot_boxplot(df, x_col, title, outfile, xlim):
+            # Only plot populations that actually have data. order=pop_color_dict.keys() would include
+            # empty categories (e.g. when the auto one-population TSV uses code "ALL", which is not in
+            # pop_color_dict) -> seaborn 0.13.2 draws zero boxes and leaves 'boxprops' unbound in
+            # _configure_legend (UnboundLocalError). Restrict order/palette to present populations.
+            present = list(pd.unique(df['Population'].dropna()))
+            order = [p for p in pop_color_dict if p in present] + [p for p in present if p not in pop_color_dict]
+            if not order:
+                print(f"  [boxplot] no populations with data for '{x_col}'; skipping {outfile}", flush=True)
+                return
+            fallback = ['#7f7f7f', '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+            palette = [pop_color_dict.get(p, fallback[i % len(fallback)]) for i, p in enumerate(order)]
             plt.figure(figsize=(4, 6))
-            sns.boxplot(data=df, x=x_col, y='Population', hue='Population',
-                        order=pop_color_dict.keys(), hue_order=pop_color_dict.keys(), 
-                        palette=pop_color_dict.values())
+            sns.boxplot(data=df[df['Population'].isin(order)], x=x_col, y='Population', hue='Population',
+                        order=order, hue_order=order, palette=palette)
             plt.title(title)
             plt.xlim(xlim)
             plt.savefig(f'{outfile}.pdf', bbox_inches='tight')
             plt.close()
 
-        plot_boxplot(panel_results_df, 'Heterozygous variants per sample', 'HPRC2+HGSVC3 in AoU+HPRC2+HGSVC3', f'{output_prefix}-panel-het-all', [0, 6E4])
-        plot_boxplot(target_results_df, 'Heterozygous variants per sample', 'Target', f'{output_prefix}-target-het-all', [0, 6E4])
-        plot_boxplot(panel_results_df, 'Heterozygous SV-length insertions per sample', 'HPRC2+HGSVC3 in AoU+HPRC2+HGSVC3', f'{output_prefix}-panel-het-SV-ins', [0, 500])
-        plot_boxplot(target_results_df, 'Heterozygous SV-length insertions per sample', 'Target', f'{output_prefix}-target-het-SV-ins', [0, 500])
-        plot_boxplot(panel_results_df, 'Heterozygous SV-length deletions per sample', 'HPRC2+HGSVC3 in AoU+HPRC2+HGSVC3', f'{output_prefix}-panel-het-SV-del', [0, 500])
-        plot_boxplot(target_results_df, 'Heterozygous SV-length deletions per sample', 'Target', f'{output_prefix}-target-het-SV-del', [0, 500])
+        # Guard each boxplot: a plotting failure must NOT discard the (expensive) streaming results --
+        # pearson.tsv and the other PDFs are already written, so log and continue on any plot error.
+        _boxplots = [
+            (panel_results_df,  'Heterozygous variants per sample',            'HPRC2+HGSVC3 in AoU+HPRC2+HGSVC3', f'{output_prefix}-panel-het-all',    [0, 6E4]),
+            (target_results_df, 'Heterozygous variants per sample',            'Target',                          f'{output_prefix}-target-het-all',   [0, 6E4]),
+            (panel_results_df,  'Heterozygous SV-length insertions per sample','HPRC2+HGSVC3 in AoU+HPRC2+HGSVC3', f'{output_prefix}-panel-het-SV-ins', [0, 500]),
+            (target_results_df, 'Heterozygous SV-length insertions per sample','Target',                          f'{output_prefix}-target-het-SV-ins',[0, 500]),
+            (panel_results_df,  'Heterozygous SV-length deletions per sample', 'HPRC2+HGSVC3 in AoU+HPRC2+HGSVC3', f'{output_prefix}-panel-het-SV-del', [0, 500]),
+            (target_results_df, 'Heterozygous SV-length deletions per sample', 'Target',                          f'{output_prefix}-target-het-SV-del',[0, 500]),
+        ]
+        for _df, _x, _t, _o, _xl in _boxplots:
+            try:
+                plot_boxplot(_df, _x, _t, _o, _xl)
+            except Exception as _e:
+                print(f"  [boxplot] WARNING: failed for '{_x}' ({_o}): {_e}", flush=True)
+                plt.close('all')
 
         # 7. ALT Length Weighted Histogram
         print("Generating ALT Length Histogram...", flush=True)
