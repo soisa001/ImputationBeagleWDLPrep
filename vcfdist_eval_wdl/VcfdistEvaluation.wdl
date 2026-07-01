@@ -63,7 +63,7 @@ workflow VcfdistEvaluation {
         # optional-without-default String becomes a *required* sub-workflow input and fails to look up
         # when omitted. A defaulted String is always defined, so it propagates into the scatter cleanly.
         String vcfdist_extra_args = ""
-        Int vcfdist_mem_gb = 32              # vcfdist RAM per shard; pair with --max-ram (<= this) in extra_args or the P/R phase OOMs (default max-ram=64)
+        Int vcfdist_mem_gb = 64              # vcfdist RAM per shard; pair with --max-ram (<= this) in extra_args or the P/R phase OOMs (default max-ram=64)
 
         File? pip_wheelhouse                 # pandas wheelhouse for SummarizeEvaluations (offline pip)
     }
@@ -206,7 +206,7 @@ task Vcfdist {
         String extra_args = ""       # defaulted (not String?) so the scatter sub-workflow always resolves it
         Int verbosity = 1
         Int cpu = 1
-        Int mem_gb = 32              # set --max-ram <= mem_gb in extra_args (vcfdist P/R defaults to targeting 64 GB)
+        Int mem_gb = 64              # set --max-ram <= mem_gb in extra_args (vcfdist P/R defaults to targeting 64 GB)
 
         RuntimeAttr? runtime_attr_override
     }

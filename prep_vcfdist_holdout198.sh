@@ -76,8 +76,8 @@ MAX_SAMPLES="${MAX_SAMPLES:-5}"                   # test cap: 5 samples. Set MAX
 #      ~64 GB (threads-per-tier = max-ram/tier). MUST set --max-ram <= the task RAM or it OOMs there
 #      regardless of clustering. We set it to VCFDIST_MEM_GB/2 to leave headroom for the base (reference
 #      FASTA + variants). Override VCFDIST_EXTRA_ARGS / VCFDIST_MEM_GB to tune the speed/RAM tradeoff.
-VCFDIST_MEM_GB="${VCFDIST_MEM_GB:-32}"
-VCFDIST_EXTRA_ARGS="${VCFDIST_EXTRA_ARGS:---cluster size 100 --max-supercluster-size 10000 --max-ram $((VCFDIST_MEM_GB / 2))}"
+VCFDIST_MEM_GB="${VCFDIST_MEM_GB:-64}"
+VCFDIST_EXTRA_ARGS="${VCFDIST_EXTRA_ARGS:---cluster size 100 --max-supercluster-size 10000 --max-ram 50}"
 
 # ---- pandas wheelhouse for SummarizeEvaluations (perimeter blocks PyPI in-task) ----
 PIP_WHEELHOUSE="${PIP_WHEELHOUSE:-}"              # gs:// to a prebuilt wheelhouse.tar.gz (skips the build)
